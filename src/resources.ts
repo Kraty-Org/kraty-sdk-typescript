@@ -23,6 +23,7 @@ import type {
   FriendSearchResult,
   FriendTarget,
   Grant,
+  GrantSelfInput,
   Leaderboard,
   LeaderboardPeriods,
   LeaderboardReadOptions,
@@ -569,6 +570,29 @@ export class GrantsClient {
     const env = await this.client.request<DataEnvelope<Grant[]>>(
       'GET',
       `/sdk/v1/players/${encodeURIComponent(externalPlayerId)}/pending-grants${qs}`,
+    );
+    return env.data;
+  }
+
+  /**
+   * POST /sdk/v1/players/:p/grants: grant items / currency / a crate to
+   * the ACTIVE player. Self-only — the player secret means you can only
+   * grant to yourself, never another player.
+   *
+   * Requires the game's inventory management to be **permissive**; any
+   * other mode fails with a 403 (`inventory_not_permissive`). In permissive
+   * mode the grant auto-deposits into the player's holdings, so you can read
+   * it straight back with `inventory.list()` / `inventory.wallet()`.
+   *
+   * @example
+   * await kraty.grants.grant({ entries: [{ type: 'item', itemKey: 'gold_sword', quantity: 1 }] });
+   */
+  async grant(input: GrantSelfInput, opts: { as?: string } = {}): Promise<Grant> {
+    const externalPlayerId = await resolvePlayerId(this.client, opts.as, 'grants.grant');
+    const env = await this.client.request<DataEnvelope<Grant>>(
+      'POST',
+      `/sdk/v1/players/${encodeURIComponent(externalPlayerId)}/grants`,
+      input,
     );
     return env.data;
   }

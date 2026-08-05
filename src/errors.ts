@@ -39,7 +39,9 @@ export type KratyErrorCode =
   | 'invalid_entry_requirement'
   | 'insufficient_entry_cost'
   // ── matchmaking ────────────────────────────────────────────────
-  | 'lobby_forming';
+  | 'lobby_forming'
+  // ── inventory ──────────────────────────────────────────────────
+  | 'inventory_not_permissive';
 
 export interface KratyErrorPayload {
   code: KratyErrorCode | string;
@@ -155,6 +157,13 @@ export class KratyApiError extends Error {
    * UX has to live in your own backend.
    */
   get isPlayerAlreadyRegistered(): boolean { return this.code === 'player_already_registered'; }
+
+  /**
+   * 403: `grants.grant` (a client-side grant) on a game whose inventory
+   * management isn't `permissive`. Enable it in the game's Settings, or
+   * create grants from your backend with a `server_integration` key.
+   */
+  get isInventoryNotPermissive(): boolean { return this.code === 'inventory_not_permissive'; }
 
   // ── events / attempts ────────────────────────────────────────────
 

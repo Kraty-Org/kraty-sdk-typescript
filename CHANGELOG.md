@@ -4,6 +4,14 @@ All notable changes to `@kraty/sdk` (Kraty TypeScript SDK) live here.
 Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) +
 [SemVer](https://semver.org/).
 
+## [0.19.0](https://github.com/PedroTrincheiras/Kraty/compare/sdk-client-typescript-v0.18.1...sdk-client-typescript-v0.19.0) (2026-08-05)
+
+
+### Features
+
+* **inventory:** `grants.grant()` — client-side self-grants for games in **permissive** inventory mode. The player-authenticated client grants items / currency / a crate to its OWN player (self only; enforced by the player secret). A game that isn't in permissive mode returns `403 inventory_not_permissive` (`err.isInventoryNotPermissive`). Permissive is platform-managed, so a reward grant auto-deposits and is readable from `inventory` / `wallet`.
+* **leaderboards:** board-info reads now expose per-division promotion / relegation limits via the `progression` field (`ProgressionLimits`), so a client can show how many players promote out of — or drop from — the current division.
+
 ## [0.18.1](https://github.com/PedroTrincheiras/Kraty/compare/sdk-client-typescript-v0.18.0...sdk-client-typescript-v0.18.1) (2026-07-24)
 
 

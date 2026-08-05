@@ -29,7 +29,7 @@ import {
  * not a contract break.
  */
 const SDK_NAME = '@kraty/sdk';
-const SDK_VERSION = '0.9.0';
+const SDK_VERSION = '0.19.0';
 const SDK_USER_AGENT = `${SDK_NAME}/${SDK_VERSION}`;
 
 /**

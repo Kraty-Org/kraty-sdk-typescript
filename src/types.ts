@@ -88,6 +88,21 @@ export interface PlayerIdentity {
 }
 
 /**
+ * Promotion / relegation limits for a board division, surfaced on board
+ * reads so a game can render "top N promote / bottom N relegate" straight
+ * from server config — change the ladder in the dashboard and every client
+ * reflects it without a new build. Each side is `null` when the board runs
+ * no ladder on that end; `places` is the furthest position that still moves,
+ * `itemKey` the progression item that gets nudged.
+ */
+export interface ProgressionLimits {
+  /** The top `places` positions promote (climb `itemKey`); null if none. */
+  promotion: { places: number; itemKey: string } | null;
+  /** The bottom `places` positions relegate (drop `itemKey`); null if none. */
+  relegation: { places: number; itemKey: string } | null;
+}
+
+/**
  * The auto-generated per-event-window leaderboard, addressed by the
  * UUID returned in `events.start(...)`'s `attempt.leaderboardId`. For
  * the dashboard-configured cross-event boards, see {@link Leaderboard}.
@@ -98,6 +113,8 @@ export interface EventLeaderboard {
   finalized: boolean;
   entries: LeaderboardEntry[];
   self: { rank: number; score: number } | null;
+  /** Promotion/relegation cutoffs for this division, from server config. */
+  progression?: ProgressionLimits;
   /** `true` on the response to `join(...)`; absent on plain reads. */
   joined?: boolean;
 }
@@ -129,6 +146,8 @@ export interface Leaderboard {
   segment: string | null;
   /** ISO timestamp of the period this read refers to. */
   period: string;
+  /** Promotion/relegation cutoffs for this division, from server config. */
+  progression?: ProgressionLimits;
   entries: LeaderboardEntry[];
   self: { rank: number; score: number } | null;
   /** `true` on the response to `join(...)`; absent on plain reads. */
@@ -259,6 +278,29 @@ export interface Grant {
 export interface OpenCrateResponse {
   crate: Grant;
   contents: Grant;
+}
+
+/** One line of a client-initiated grant (see {@link GrantsClient.grant}). */
+export type GrantEntryInput =
+  | { type: 'currency'; currencyKey: string; amount: number }
+  | { type: 'item'; itemKey: string; quantity: number; parameters?: Record<string, unknown> }
+  | { type: 'crate'; crateItemKey: string; quantity: number };
+
+/**
+ * Body of a client-initiated grant. The player secret makes it self-only
+ * (you can only grant to the active player), and the game's inventory
+ * management must be `permissive` or the server returns 403
+ * `inventory_not_permissive`.
+ */
+export interface GrantSelfInput {
+  entries: GrantEntryInput[];
+  /** Defaults to `'reward'`. Use `'crate'` for a grant opened later via {@link GrantsClient.open}. */
+  kind?: GrantKind;
+  /** Optional grant TTL (ISO datetime). */
+  expiresAt?: string;
+  metadata?: Record<string, unknown>;
+  /** Optional dedupe key; a replay with the same key returns the same grant. */
+  idempotencyKey?: string;
 }
 
 /**
