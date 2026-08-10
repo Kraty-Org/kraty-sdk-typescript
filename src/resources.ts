@@ -209,6 +209,7 @@ export class LeaderboardsClient {
   async read(key: string, opts: LeaderboardReadOptions = {}): Promise<Leaderboard> {
     const params = new URLSearchParams();
     if (typeof opts.limit === 'number') params.set('limit', String(opts.limit));
+    if (opts.progression?.length) params.set('progression', opts.progression.join(','));
     if (opts.segment) params.set('segment', opts.segment);
     if (opts.period) params.set('period', opts.period);
     if (opts.includeSelf) {
@@ -310,6 +311,7 @@ export class LeaderboardsClient {
     if (opts.period) params.set('period', opts.period);
     if (typeof opts.limit === 'number') params.set('limit', String(opts.limit));
     if (typeof opts.maxSegments === 'number') params.set('maxSegments', String(opts.maxSegments));
+    if (opts.progression?.length) params.set('progression', opts.progression.join(','));
     // self_segment / mine need a caller; auto-resolve the active
     // identity when the dev didn't pass one explicitly.
     let externalId = opts.externalId;
@@ -364,6 +366,7 @@ export class EventLeaderboardsClient {
   ): Promise<EventLeaderboard> {
     const params = new URLSearchParams();
     if (typeof opts.limit === 'number') params.set('limit', String(opts.limit));
+    if (opts.progression?.length) params.set('progression', opts.progression.join(','));
     if (opts.includeSelf) {
       params.set('includeSelf', 'true');
       // Lazily resolve the active player when the dev didn't pass an

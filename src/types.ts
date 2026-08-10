@@ -72,6 +72,12 @@ export interface LeaderboardEntry {
    * entries regardless.
    */
   isSelf: boolean;
+  /**
+   * Per-player progression balances requested via `progression: ['level']`
+   * on the read, e.g. `{ level: 12 }`. Absent when none were requested; a
+   * resource the player never earned reads `0`. Never present on bot rows.
+   */
+  progression?: Record<string, number>;
 }
 
 /**
@@ -122,6 +128,11 @@ export interface EventLeaderboard {
 export interface EventLeaderboardReadOptions {
   /** Number of entries to fetch. 1–200, default 50 on the server side. */
   limit?: number;
+  /**
+   * Progression economy keys to attach to each player entry (max 8), e.g.
+   * `['level']`. Omit and nothing extra is read server-side.
+   */
+  progression?: string[];
   /** When true, server returns `self: { rank, score }` for the given externalId. */
   includeSelf?: boolean;
   /** Required when `includeSelf` is set. */
@@ -186,6 +197,8 @@ export interface BoardStandings {
 }
 
 export interface StandingsReadOptions {
+  /** Progression economy keys to attach to each player entry (max 8). */
+  progression?: string[];
   /**
    * Which segments to return (default `'all'`):
    *   - `'self_segment'`: the caller's single home segment.
@@ -225,6 +238,8 @@ export interface LeaderboardScoreResult {
 }
 
 export interface LeaderboardReadOptions {
+  /** Progression economy keys to attach to each player entry (max 8). */
+  progression?: string[];
   /** Top-N rows to return (1..200, default 50). */
   limit?: number;
   /**
