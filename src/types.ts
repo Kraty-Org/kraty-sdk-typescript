@@ -662,6 +662,38 @@ export interface DebitWalletResult {
   applied: boolean;
 }
 
+/**
+ * Input for `WalletClient.progress`. `amount` is signed: positive
+ * advances, negative rolls back (never below zero).
+ */
+export interface ProgressWalletInput {
+  amount: number;
+  reason?: string;
+  idempotencyKey?: string;
+}
+
+/**
+ * A progression item the platform recomputed as a consequence of a
+ * `progress` call — typically the player's `level` following their `xp`.
+ * `grantIds` are the per-level rewards that fired; fetch them with
+ * `grants.list()` / `grants.collectAll()`.
+ */
+export interface DerivedProgressionChange {
+  economyKey: string;
+  previous: number;
+  current: number;
+  delta: number;
+  grantIds: string[];
+}
+
+export interface ProgressWalletResult {
+  economyKey: string;
+  balance: number;
+  applied: boolean;
+  /** Empty unless another item is configured to derive from this one. */
+  derived: DerivedProgressionChange[];
+}
+
 // ── Friends / social graph ─────────────────────────────────────────────
 
 /**
@@ -671,6 +703,10 @@ export interface DebitWalletResult {
  */
 export interface Friend {
   externalPlayerId: string;
+  /** Progression balances requested via `friends.list({ progression: [...] })`,
+   *  e.g. `{ level: 12 }`. Absent when none were requested; a resource the
+   *  friend never touched reads 0. */
+  progression?: Record<string, number>;
   displayIdentity: PlayerIdentity | null;
   /** ISO timestamp the friendship was established. */
   friendsSince: string;
@@ -685,6 +721,9 @@ export interface Friend {
 export interface FriendCode {
   friendCode: string;
   displayIdentity: PlayerIdentity | null;
+  /** The caller's own progression balances, when requested via
+   *  `friends.getCode({ progression: ['level'] })`. */
+  progression?: Record<string, number>;
 }
 
 /** The player's own presence after a heartbeat. */
@@ -734,6 +773,8 @@ export interface FriendSearchResult {
   externalPlayerId: string;
   displayIdentity: PlayerIdentity | null;
   relationship: FriendRelationship;
+  /** Progression balances when requested via `friends.search(q, { progression })`. */
+  progression?: Record<string, number>;
 }
 
 /** A player the caller has blocked. */

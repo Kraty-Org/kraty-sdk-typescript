@@ -6,6 +6,11 @@ import {
   type LeaderboardStream,
   type LeaderboardStreamEvent,
 } from './leaderboard-stream.js';
+import {
+  openInventoryStream,
+  type InventoryStream,
+  type InventoryStreamEvent,
+} from './inventory-stream.js';
 import type {
   BoardStandings,
   BlockedPlayer,
@@ -14,6 +19,8 @@ import type {
   ConsumeItemResult,
   DebitWalletInput,
   DebitWalletResult,
+  ProgressWalletInput,
+  ProgressWalletResult,
   EventLeaderboard,
   EventLeaderboardReadOptions,
   EventListing,
@@ -735,6 +742,83 @@ export class InventoryClient {
     );
     return env.data;
   }
+
+  /**
+   * GET `/inventory/stream`: live subscription to everything that touches
+   * this player's items, wallet, and grants — whoever caused it. A reward
+   * granted from the dashboard, a currency credited by the studio's
+   * backend, an event payout, and the client's own consume all arrive here.
+   *
+   * Returns the raw stream handle. Iterate `events` and call `close()` when
+   * done; see {@link InventoryClient.watch} for the callback form.
+   *
+   * ```ts
+   * const stream = await kraty.inventory.live();
+   * for await (const ev of stream.events) {
+   *   if (ev.kind === 'inventory_changed') refreshBackpack();
+   * }
+   * ```
+   *
+   * Does NOT auto-reconnect: re-call after a backoff if the iterable throws.
+   * Treat every event as "refresh this"; the REST reads stay authoritative.
+   */
+  async live(opts: { as?: string } = {}): Promise<InventoryStream> {
+    const externalPlayerId = await resolvePlayerId(this.client, opts.as, 'inventory.live');
+    return openInventoryStream({
+      fetchImpl: this.client.fetchForStreaming,
+      baseUrl: this.client.baseUrl,
+      externalPlayerId,
+      authHeader: this.client.authHeader,
+      playerSecret: this.client.playerSecret,
+      sdkUserAgent: this.client.sdkUserAgent,
+    });
+  }
+
+  /**
+   * Callback form of {@link InventoryClient.live}: the one-liner most games
+   * want.
+   *
+   * ```ts
+   * const stop = await kraty.inventory.watch((ev) => {
+   *   if (ev.kind === 'grant_created') showRewardPopup(ev.contents);
+   * });
+   * // later
+   * await stop();
+   * ```
+   *
+   * Pass `ignoreOwnWrites: true` to skip events the client itself caused
+   * (`origin: 'client'`), so a consume doesn't bounce back as a refresh.
+   * `onError` receives transport failures; the subscription is finished by
+   * the time it fires, so reconnect from there if you want resumption.
+   * Returns a stop function; calling it more than once is safe.
+   */
+  async watch(
+    handler: (event: InventoryStreamEvent) => void,
+    opts: {
+      ignoreOwnWrites?: boolean;
+      onError?: (err: unknown) => void;
+      as?: string;
+    } = {},
+  ): Promise<() => Promise<void>> {
+    const stream = await this.live(opts.as ? { as: opts.as } : {});
+    void (async () => {
+      try {
+        for await (const ev of stream.events) {
+          if (
+            opts.ignoreOwnWrites &&
+            'origin' in ev &&
+            (ev as { origin?: string }).origin === 'client'
+          ) {
+            continue;
+          }
+          handler(ev);
+        }
+      } catch (err) {
+        opts.onError?.(err);
+      }
+    })();
+    return () => stream.close();
+  }
 }
 
 /**
@@ -777,6 +861,38 @@ export class WalletClient {
       input,
     );
     return env.data;
+  }
+
+  /**
+   * POST /sdk/v1/players/:p/wallet/:economyKey/progress: push progress
+   * into a **progression** resource straight from the game client — XP
+   * from a finished run, distance travelled, stars collected — with no
+   * studio backend in the loop.
+   *
+   * The resource must be `kind: 'progression'` AND flagged
+   * **client-writable** in the dashboard; otherwise the call fails 403.
+   * Spendable currencies are never client-writable.
+   *
+   * Anything derived from this resource moves with it in the same
+   * transaction, and each level crossed pays its configured reward, so a
+   * single call can come back with `derived: [{ economyKey: 'level',
+   * previous: 3, current: 5, grantIds: [...] }]` — enough to render
+   * "Level 5!" and the reward popup without a second request.
+   */
+  async progress(
+    economyKey: string,
+    input: ProgressWalletInput,
+    opts: { as?: string } = {},
+  ): Promise<ProgressWalletResult> {
+    const externalPlayerId = await resolvePlayerId(this.client, opts.as, 'wallet.progress');
+    const env = await this.client.request<DataEnvelope<ProgressWalletResult>>(
+      'POST',
+      `/sdk/v1/players/${encodeURIComponent(externalPlayerId)}/wallet/${encodeURIComponent(
+        economyKey,
+      )}/progress`,
+      input,
+    );
+    return { ...env.data, derived: env.data?.derived ?? [] };
   }
 }
 
@@ -941,6 +1057,18 @@ export class PlayersClient {
  * scoped to the same game + environment. Pass `{ as }` on any method to
  * address a different player (server-side tooling only).
  */
+/**
+ * `?progression=level,trophies` for the social-graph reads. Every friends
+ * endpoint accepts it and attaches those balances to each returned player,
+ * so a friends list can render "Lv 12" without an extra call per friend.
+ * Which key means "level" is per-game, which is why it's a parameter and
+ * not a fixed field.
+ */
+function progressionQuery(keys: string[] | undefined): string {
+  if (!keys || keys.length === 0) return '';
+  return `?progression=${encodeURIComponent(keys.join(','))}`;
+}
+
 export class FriendsClient {
   constructor(private readonly client: KratyClient) {}
 
@@ -950,11 +1078,13 @@ export class FriendsClient {
    * forever after. Share it out-of-band so a friend can `add` you
    * without a username search.
    */
-  async getCode(opts: { as?: string } = {}): Promise<FriendCode> {
+  async getCode(opts: { progression?: string[]; as?: string } = {}): Promise<FriendCode> {
     const externalPlayerId = await resolvePlayerId(this.client, opts.as, 'friends.getCode');
     const env = await this.client.request<DataEnvelope<FriendCode>>(
       'GET',
-      `/sdk/v1/players/${encodeURIComponent(externalPlayerId)}/friend-code`,
+      `/sdk/v1/players/${encodeURIComponent(externalPlayerId)}/friend-code${progressionQuery(
+        opts.progression,
+      )}`,
     );
     return env.data;
   }
@@ -984,11 +1114,13 @@ export class FriendsClient {
    * GET `/friends`: the caller's accepted friends, each enriched with
    * display identity and live presence (online / last-active / status).
    */
-  async list(opts: { as?: string } = {}): Promise<Friend[]> {
+  async list(opts: { progression?: string[]; as?: string } = {}): Promise<Friend[]> {
     const externalPlayerId = await resolvePlayerId(this.client, opts.as, 'friends.list');
     const env = await this.client.request<DataEnvelope<{ friends: Friend[] }>>(
       'GET',
-      `/sdk/v1/players/${encodeURIComponent(externalPlayerId)}/friends`,
+      `/sdk/v1/players/${encodeURIComponent(externalPlayerId)}/friends${progressionQuery(
+        opts.progression,
+      )}`,
     );
     return env.data.friends;
   }
@@ -998,10 +1130,14 @@ export class FriendsClient {
    * the same game + environment. Each hit reports the caller's
    * relationship to that player; blocked players are omitted.
    */
-  async search(query: string, opts: { limit?: number; as?: string } = {}): Promise<FriendSearchResult[]> {
+  async search(
+    query: string,
+    opts: { limit?: number; progression?: string[]; as?: string } = {},
+  ): Promise<FriendSearchResult[]> {
     const externalPlayerId = await resolvePlayerId(this.client, opts.as, 'friends.search');
     const params = new URLSearchParams({ q: query });
     if (opts.limit !== undefined) params.set('limit', String(opts.limit));
+    if (opts.progression?.length) params.set('progression', opts.progression.join(','));
     const env = await this.client.request<DataEnvelope<{ results: FriendSearchResult[] }>>(
       'GET',
       `/sdk/v1/players/${encodeURIComponent(externalPlayerId)}/friends/search?${params.toString()}`,
@@ -1013,11 +1149,13 @@ export class FriendsClient {
    * GET `/friends/requests`: the caller's pending incoming + outgoing
    * friend requests.
    */
-  async listRequests(opts: { as?: string } = {}): Promise<FriendRequests> {
+  async listRequests(opts: { progression?: string[]; as?: string } = {}): Promise<FriendRequests> {
     const externalPlayerId = await resolvePlayerId(this.client, opts.as, 'friends.listRequests');
     const env = await this.client.request<DataEnvelope<FriendRequests>>(
       'GET',
-      `/sdk/v1/players/${encodeURIComponent(externalPlayerId)}/friends/requests`,
+      `/sdk/v1/players/${encodeURIComponent(externalPlayerId)}/friends/requests${progressionQuery(
+        opts.progression,
+      )}`,
     );
     return env.data;
   }

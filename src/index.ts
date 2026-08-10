@@ -52,6 +52,18 @@ export type {
   LeaderboardFinalizedData,
   LeaderboardStanding,
 } from './leaderboard-stream.js';
+export { openInventoryStream } from './inventory-stream.js';
+export type {
+  InventoryStream,
+  InventoryStreamEvent,
+  InventoryEventOrigin,
+  InventoryChangedEvent,
+  WalletChangedEvent,
+  GrantCreatedEvent,
+  InventoryReadyEvent,
+} from './inventory-stream.js';
+export { openSseStream } from './sse.js';
+export type { SseEvent, SseStream } from './sse.js';
 export {
   FinalizationTracker,
   InMemoryMembershipStore,
