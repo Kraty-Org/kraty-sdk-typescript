@@ -730,6 +730,10 @@ export interface Friend {
   lastActiveAt: string | null;
   /** Free-form client-set status ("in_match", "lobby", …), or null. */
   status: string | null;
+  /** ISO timestamp when this friend may be gifted again. Absent means
+   *  "giftable now" (or the game has gifting turned off), so a UI can treat
+   *  presence-of-field as "disable the gift button until then". */
+  giftCooldownUntil?: string;
 }
 
 /** The caller's shareable friend code + display identity. */
@@ -797,4 +801,77 @@ export interface BlockedPlayer {
   externalPlayerId: string;
   displayIdentity: PlayerIdentity | null;
   blockedAt: string;
+}
+
+// ── Friend gifting ─────────────────────────────────────────────────────
+
+/**
+ * What a gift moves. `'currency'` addresses `catalog.currencies`, which
+ * covers progression items (XP, trophies) as well as spendable currencies —
+ * the two share one catalog table.
+ */
+export type GiftResourceType = 'item' | 'currency';
+
+/** One entry of the studio's gifting allowlist. */
+export interface GiftableResource {
+  type: GiftResourceType;
+  key: string;
+  /** Display name; a plain string, or a locale map for localized catalogs. */
+  name: string | Record<string, string>;
+  iconUrl: string | null;
+  /** Economy rows only: spendable currency vs progression. */
+  economyKind?: 'currency' | 'progression';
+  /** Item rows only. */
+  rarity?: string | null;
+  /** Largest amount one gift of this resource may carry. */
+  maxAmount: number;
+  /** Whether sending debits the sender's own holdings. */
+  costsSender: boolean;
+}
+
+/** The gifting allowlist plus the game's limits, from `friends.giftCatalog()`. */
+export interface GiftCatalog {
+  enabled: boolean;
+  /** Wait between two gifts to the SAME friend. 0 ⇒ no per-pair wait. */
+  cooldownSeconds: number;
+  /** Rolling-24h cap across all friends; null ⇒ unlimited. */
+  dailySendLimit: number | null;
+  /** Gifts the caller already sent inside that window. */
+  sentToday: number;
+  resources: GiftableResource[];
+}
+
+export type GiftStatus = 'pending' | 'claimed' | 'expired' | 'failed';
+
+/** A gift, from either side of the exchange. */
+export interface Gift {
+  giftId: string;
+  /** The grant delivering it. Also claimable through `grants.claim`. */
+  grantId: string;
+  direction: 'incoming' | 'outgoing';
+  /** The other party: sender for incoming, recipient for outgoing. */
+  player: { externalPlayerId: string; displayIdentity: PlayerIdentity | null };
+  type: GiftResourceType;
+  resourceKey: string;
+  amount: number;
+  message: string | null;
+  /** Mirrors the delivering grant: `pending` until claimed. */
+  status: GiftStatus;
+  sentAt: string;
+  claimedAt: string | null;
+  expiresAt: string | null;
+}
+
+/** What to send, and to whom. The target must be an accepted friend. */
+export interface SendGiftInput {
+  to: FriendTarget;
+  type: GiftResourceType;
+  /** Must name a catalog row the studio flagged giftable. */
+  resourceKey: string;
+  amount: number;
+  /** Optional short note (trimmed to 140 chars server-side). */
+  message?: string | null;
+  /** Replay guard: a retry with the same key returns the original gift
+   *  rather than tripping the cooldown. */
+  idempotencyKey?: string;
 }

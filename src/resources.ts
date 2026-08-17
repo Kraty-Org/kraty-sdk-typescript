@@ -29,6 +29,9 @@ import type {
   FriendRequests,
   FriendSearchResult,
   FriendTarget,
+  Gift,
+  GiftCatalog,
+  SendGiftInput,
   Grant,
   GrantSelfInput,
   Leaderboard,
@@ -1067,6 +1070,14 @@ export class PlayersClient {
  * Which key means "level" is per-game, which is why it's a parameter and
  * not a fixed field.
  */
+function giftQuery(opts: { pendingOnly?: boolean; limit?: number }): string {
+  const params = new URLSearchParams();
+  if (opts.pendingOnly) params.set('status', 'pending');
+  if (opts.limit !== undefined) params.set('limit', String(opts.limit));
+  const query = params.toString();
+  return query ? `?${query}` : '';
+}
+
 function progressionQuery(keys: string[] | undefined): string {
   if (!keys || keys.length === 0) return '';
   return `?progression=${encodeURIComponent(keys.join(','))}`;
@@ -1252,6 +1263,92 @@ export class FriendsClient {
       'DELETE',
       `/sdk/v1/players/${encodeURIComponent(externalPlayerId)}/blocks/${encodeURIComponent(blockedExternalId)}`,
     );
+  }
+
+  // ── Gifting ──────────────────────────────────────────────────────────
+
+  /**
+   * GET `/friends/gifts/catalog`: what this player may gift and how often.
+   *
+   * Returns the studio's allowlist (every catalog row flagged giftable in
+   * the dashboard) plus the game's cooldown / daily-limit config, so a gift
+   * picker can be built entirely from server config. `type: 'currency'`
+   * entries include progression items like XP.
+   *
+   * Throws `403 gifting_disabled` when the game hasn't enabled gifting.
+   */
+  async giftCatalog(opts: { as?: string } = {}): Promise<GiftCatalog> {
+    const externalPlayerId = await resolvePlayerId(this.client, opts.as, 'friends.giftCatalog');
+    const env = await this.client.request<DataEnvelope<GiftCatalog>>(
+      'GET',
+      `/sdk/v1/players/${encodeURIComponent(externalPlayerId)}/friends/gifts/catalog`,
+    );
+    return env.data;
+  }
+
+  /**
+   * POST `/friends/gifts`: send a gift to an accepted friend.
+   *
+   * The catalog decides what can travel and how much of it; if the resource
+   * is configured to cost the sender, their balance is debited in the same
+   * transaction. The recipient gets a PENDING grant that stays unopened
+   * until they call {@link claimGift}.
+   *
+   * Pass `idempotencyKey` so a retry returns the original gift instead of
+   * failing the per-friend cooldown.
+   */
+  async sendGift(input: SendGiftInput, opts: { as?: string } = {}): Promise<Gift> {
+    const externalPlayerId = await resolvePlayerId(this.client, opts.as, 'friends.sendGift');
+    const { to, ...rest } = input;
+    const env = await this.client.request<DataEnvelope<{ gift: Gift }>>(
+      'POST',
+      `/sdk/v1/players/${encodeURIComponent(externalPlayerId)}/friends/gifts`,
+      { ...to, ...rest },
+    );
+    return env.data.gift;
+  }
+
+  /**
+   * GET `/friends/gifts`: the player's gift inbox, newest first.
+   * `{ pendingOnly: true }` narrows it to gifts still waiting to be claimed.
+   */
+  async gifts(
+    opts: { pendingOnly?: boolean; limit?: number; as?: string } = {},
+  ): Promise<Gift[]> {
+    const externalPlayerId = await resolvePlayerId(this.client, opts.as, 'friends.gifts');
+    const env = await this.client.request<DataEnvelope<{ gifts: Gift[] }>>(
+      'GET',
+      `/sdk/v1/players/${encodeURIComponent(externalPlayerId)}/friends/gifts${giftQuery(opts)}`,
+    );
+    return env.data.gifts;
+  }
+
+  /** GET `/friends/gifts/sent`: gifts this player has sent, newest first. */
+  async sentGifts(
+    opts: { pendingOnly?: boolean; limit?: number; as?: string } = {},
+  ): Promise<Gift[]> {
+    const externalPlayerId = await resolvePlayerId(this.client, opts.as, 'friends.sentGifts');
+    const env = await this.client.request<DataEnvelope<{ gifts: Gift[] }>>(
+      'GET',
+      `/sdk/v1/players/${encodeURIComponent(externalPlayerId)}/friends/gifts/sent${giftQuery(opts)}`,
+    );
+    return env.data.gifts;
+  }
+
+  /**
+   * POST `/friends/gifts/:giftId/claim`: claim a received gift.
+   *
+   * This is where a gift actually pays out — the delivering grant defers its
+   * deposit to claim time so an unopened gift is genuinely unopened. Replays
+   * on an already-claimed gift return the same row.
+   */
+  async claimGift(giftId: string, opts: { as?: string } = {}): Promise<Gift> {
+    const externalPlayerId = await resolvePlayerId(this.client, opts.as, 'friends.claimGift');
+    const env = await this.client.request<DataEnvelope<{ gift: Gift }>>(
+      'POST',
+      `/sdk/v1/players/${encodeURIComponent(externalPlayerId)}/friends/gifts/${encodeURIComponent(giftId)}/claim`,
+    );
+    return env.data.gift;
   }
 }
 
