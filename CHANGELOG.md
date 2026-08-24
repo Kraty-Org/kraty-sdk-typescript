@@ -4,6 +4,84 @@ All notable changes to `@kraty/sdk` (Kraty TypeScript SDK) live here.
 Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) +
 [SemVer](https://semver.org/).
 
+## [0.26.0](https://github.com/Kraty-Org/Kraty/compare/sdk-client-typescript-v0.25.0...sdk-client-typescript-v0.26.0) (2026-08-24)
+
+
+### ⚠ BREAKING CHANGES
+
+* **players:** the shape of the setIdentity route responses (SDK, server, admin) is now `{displayIdentity, anonymizedIdentity}` in place of the previous single `syntheticIdentity` field. Callers reading `response.data.syntheticIdentity` must switch to `response.data.displayIdentity` (for the real display value) or `response.data.anonymizedIdentity` (for the pool value).
+* **sdk:** the finalization MembershipKind wire/persisted values are now 'leaderboard' and 'event_leaderboard' (were 'shared_board' / 'event_board'). Client apps that persisted membership refs across an upgrade should clear them.
+* **leaderboards:** the cross-event ("shared") leaderboard id in SDK/API responses is now `leaderboardId` (was `sharedLeaderboardId`). Physical DB tables were renamed; migration 0012 must run.
+* **api:** API responses and SDK types now use `avatar` instead of `avatarUrl` for leaderboard entries and the player synthetic identity. Client code reading `entry.avatarUrl` or `syntheticIdentity.avatarUrl` must switch to `avatar`.
+* **api,sdks:** rename leaderboard URLs to match v0.4.0 client split
+* **sdks:** split Leaderboards into Leaderboards (by key) + EventLeaderboards (by UUID)
+
+### Features
+
+* **api,sdks:** attempt quota on events listing + fix cap check order ([8cd1ead](https://github.com/Kraty-Org/Kraty/commit/8cd1eadb40c671703f13c52135530b3288e7bb64))
+* **api,sdks:** rename leaderboard URLs to match v0.4.0 client split ([53897ca](https://github.com/Kraty-Org/Kraty/commit/53897ca4cc245569dc86353de72fda3df8b925b9))
+* **api,sdks:** surface attempt quota (used vs. allowed) on the events listing ([614709e](https://github.com/Kraty-Org/Kraty/commit/614709e3a195dc5c23e9a05d08ceb11a4616a8a7))
+* **api:** leaderboard join + flexible multi-segment standings ([7a9f11f](https://github.com/Kraty-Org/Kraty/commit/7a9f11f2598fa6bed8c6036863172b666e1ebce4))
+* **api:** rename identity/leaderboard avatarUrl field to avatar ([76971be](https://github.com/Kraty-Org/Kraty/commit/76971be73e6313d8b54c1a947c1b82557885a702))
+* **economy,engine:** derived progression, live inventory stream, and QA fixes ([e77fea7](https://github.com/Kraty-Org/Kraty/commit/e77fea74b8fe172eccbc65b59f886498488d289a))
+* **economy,engine:** derived progression, live inventory stream, and QA fixes ([b65d4fe](https://github.com/Kraty-Org/Kraty/commit/b65d4fe2b3bdf3106d5ec15a32486321c405efbe))
+* finish an attempt now (player "end my run") across API + all SDKs ([f1ba2a0](https://github.com/Kraty-Org/Kraty/commit/f1ba2a0fa56a51a513bdbc865dd4ea9d854a8a65))
+* **friends:** player social graph — friend codes, requests, presence, blocking ([4430123](https://github.com/Kraty-Org/Kraty/commit/4430123e34264b40910f538f32d431453d15a042))
+* **friends:** social graph + matchmade-session score fix + Sessions tab ([f347a22](https://github.com/Kraty-Org/Kraty/commit/f347a220ec65fd38b5db7eed2b7dfb324405479d))
+* **leaderboards:** per-player progression on board entries via ?progression= ([9b6fac7](https://github.com/Kraty-Org/Kraty/commit/9b6fac762e7c9295786058d8024d36811dcc2329))
+* **leaderboards:** per-player progression on board entries via ?progression= ([e47bba6](https://github.com/Kraty-Org/Kraty/commit/e47bba6c13b2acbf58d742dde329fa4e998055f1))
+* **leaderboards:** server-side country on join + country on entries/register (flags) ([666c505](https://github.com/Kraty-Org/Kraty/commit/666c5051211efef1de97b1917e43f78327959581))
+* per-division bots & promotion, permissive inventory, and dashboard UX ([151e3bc](https://github.com/Kraty-Org/Kraty/commit/151e3bc43baabb614b5b31a29802225a30e754fc))
+* per-division bots & promotion, permissive inventory, and dashboard UX ([5de7960](https://github.com/Kraty-Org/Kraty/commit/5de79605d73736fa4f3a03261024616b68a58294))
+* **players:** client-SDK self-service identity change ([d73e2b9](https://github.com/Kraty-Org/Kraty/commit/d73e2b95a4a4a17447bfb90fe2a950b1afb599e5))
+* **players:** free-form metadata + fetch-on-read Player envelope + SDK setMetadata/mergeMetadata ([5a6d1f9](https://github.com/Kraty-Org/Kraty/commit/5a6d1f94bbaaf69ef7d8b40012747c651538e8e8))
+* **players:** split real vs synthetic identity + retroactive rename fan-out ([316ced8](https://github.com/Kraty-Org/Kraty/commit/316ced879f67df1cda71ad1d81bdc8ef2d91742b))
+* **portal:** pool detail page + create-flow polish; release SDKs v0.3.0 ([cf7231d](https://github.com/Kraty-Org/Kraty/commit/cf7231d697bbb3485440c21f99578fd288ebf787))
+* **sdks:** leaderboard submitScore (client TS/Unity/Flutter) + server scoring/progress ([02f4e69](https://github.com/Kraty-Org/Kraty/commit/02f4e6944813639ca19349ff1a9c28c92e6aa62f))
+* **sdks:** players.setMetadata / mergeMetadata across TS, Unity, Flutter ([616a96a](https://github.com/Kraty-Org/Kraty/commit/616a96a2e91f57d4ce138a182108bb3f32453058))
+* **sdks:** split Leaderboards into Leaderboards (by key) + EventLeaderboards (by UUID) ([96116ac](https://github.com/Kraty-Org/Kraty/commit/96116acf7eb90ff32f2f5e9e7cf5617dc7610ec7))
+* **sdk:** subscribe() helper + lazy-eval publishes bot deltas ([099d15d](https://github.com/Kraty-Org/Kraty/commit/099d15dc959c0619210319d343dc380c8b74c02d))
+* **sdk:** surface synthetic identity + align progress verb across SDKs ([6e346f7](https://github.com/Kraty-Org/Kraty/commit/6e346f7328a3f58dd08d51f5f7d15c93e013aba6))
+* session events — sudden-death sessions, convergence, promotion/relegation ([#5](https://github.com/Kraty-Org/Kraty/issues/5)) ([c3d698f](https://github.com/Kraty-Org/Kraty/commit/c3d698f8f73816a63a9ae799841d8d8eef3e1d4f))
+* session-timer fixes, server clock, finalization standings enrichment ([d2aa1c8](https://github.com/Kraty-Org/Kraty/commit/d2aa1c8e74827dae1ff412d8e215b4559e5178cf))
+* **social:** friend gifting — send items and currencies to friends ([83962f9](https://github.com/Kraty-Org/Kraty/commit/83962f9988f6b932a89e9f975f9464302632177a))
+* **social:** friend gifting — send items and currencies to friends ([341ec76](https://github.com/Kraty-Org/Kraty/commit/341ec76009435a516bc71e359e4bc9bd826f9a55))
+
+
+### Bug Fixes
+
+* **backend:** lobby fill gap + bot kind TTL race + leaderboard isSelf flag ([4122793](https://github.com/Kraty-Org/Kraty/commit/4122793ee5ac02b10de88f74fea244dd2d6d650c))
+* **bots:** score bot schedules at FACE VALUE anchored to the session start ([d2aa1c8](https://github.com/Kraty-Org/Kraty/commit/d2aa1c8e74827dae1ff412d8e215b4559e5178cf))
+* **ci:** repair all workflows after SDK restructure to client/server/ ([85f0524](https://github.com/Kraty-Org/Kraty/commit/85f0524ef1777240e04d96dd34dee3ec37ed7315))
+* **sdk:** finalization result carries eventKey on the live SSE path ([aeb7772](https://github.com/Kraty-Org/Kraty/commit/aeb7772eb0c056dd07ac3f3c75b2013870466609))
+
+
+### Documentation
+
+* rewrite root README + point every SDK README at kraty.io/docs ([0bb9b13](https://github.com/Kraty-Org/Kraty/commit/0bb9b1385ef8803aaf2f67a3a63ea746ca4b6e12))
+* **sdks:** bump client SDK install snippets + READMEs to v0.12.0 ([7e43418](https://github.com/Kraty-Org/Kraty/commit/7e434183903a14d18ebc04b0dfecbe39caace10a))
+* **sdks:** bump client-SDK install snippets + READMEs to v0.20.0 ([621efcf](https://github.com/Kraty-Org/Kraty/commit/621efcf4eb810dcc1f4542bd3a26b85eb3011b01))
+* **sdks:** bump client-SDK install snippets + READMEs to v0.21.0 ([64328d5](https://github.com/Kraty-Org/Kraty/commit/64328d5fccf97ee873c87bf622acdf340d672565))
+* **sdks:** bump client-SDK install snippets + READMEs to v0.22.0 ([b5a4293](https://github.com/Kraty-Org/Kraty/commit/b5a42938a4688e17eb19cd6c5334982cf496c613))
+* **sdks:** bump client-SDK install snippets + READMEs to v0.23.0 ([8b1a053](https://github.com/Kraty-Org/Kraty/commit/8b1a05355144ca17a16f40f77fc9bdc169f318b9))
+* **sdks:** bump install snippets — clients v0.24.0, server-ts v0.14.0 ([c9e9d83](https://github.com/Kraty-Org/Kraty/commit/c9e9d83c402d8af1d285093d5faec415cdf4e500))
+* **sdks:** bump install snippets — clients v0.25.0, server-ts v0.15.0, server-py v0.14.0 ([5c114d8](https://github.com/Kraty-Org/Kraty/commit/5c114d83e2c611ba6267cbb00bce5435decdc0cd))
+* **sdks:** bump install snippets — clients v0.26.0, server-ts v0.16.0, server-py v0.15.0 ([e1581ce](https://github.com/Kraty-Org/Kraty/commit/e1581ceee55c65a4ee07cfa81587c221bcd1060d))
+* **sdks:** bump install snippets + READMEs for the v0.11.0 / v0.8.0 release ([8cafc26](https://github.com/Kraty-Org/Kraty/commit/8cafc26a6d7618c700b9177bedb6471d29efcfc7))
+* **sdks:** bump install snippets + READMEs for the v0.13.0 / v0.9.0 release ([79ee827](https://github.com/Kraty-Org/Kraty/commit/79ee8271b43a8b5d299bcb94aa91ccea21459820))
+* **sdks:** bump install snippets + READMEs for the v0.14.0 / v0.10.0 release ([87797b6](https://github.com/Kraty-Org/Kraty/commit/87797b602f0bbbdca10f8ca6d34b4309d51be06b))
+* **sdks:** bump install snippets + READMEs for v0.15.0 / v0.11.0 release ([53ca1be](https://github.com/Kraty-Org/Kraty/commit/53ca1beae10f1fcab38c2c3c94c6b75aaad0757a))
+* **sdks:** bump install snippets + READMEs for v0.16.0 / v0.12.0 release ([9bcb424](https://github.com/Kraty-Org/Kraty/commit/9bcb42492e71114205f58d9a193e6d17554abde7))
+* **sdks:** bump install snippets + READMEs to match the release-please tag versions ([c66ffaf](https://github.com/Kraty-Org/Kraty/commit/c66ffaf27e1ac495957067003a411df8857a1c53))
+* **sdks:** bump SCHEMA.md headers to v0.4.1 + add wire-endpoint refs ([c2bc5eb](https://github.com/Kraty-Org/Kraty/commit/c2bc5eb24afecf61bb22cec0be9a234615a25877))
+* **sdks:** bump SCHEMA.md to v0.6.0 + document join + standings ([ccb57c3](https://github.com/Kraty-Org/Kraty/commit/ccb57c38bb4954277cf86780b7afd172f889c21c))
+
+
+### Refactors
+
+* **leaderboards:** rename shared leaderboards to "leaderboards", event boards to "event leaderboards" ([ec27f8e](https://github.com/Kraty-Org/Kraty/commit/ec27f8ecbc83c8381ec732e3540dbfc6099f99e5))
+* **sdk:** rename finalization board kinds to leaderboard terminology ([cd1c007](https://github.com/Kraty-Org/Kraty/commit/cd1c007c2ba71b81de3ef64168bd7a847aab890d))
+
 ## [0.25.0](https://github.com/Kraty-Org/Kraty/compare/sdk-client-typescript-v0.24.0...sdk-client-typescript-v0.25.0) (2026-08-21)
 
 
