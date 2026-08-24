@@ -432,6 +432,27 @@ export interface RewardPolicySummary {
   currencyKey?: string;
 }
 
+/**
+ * How much of the player's attempt allowance on this event window is
+ * spent, for an entry counter ("Play — 1/2 today").
+ *
+ * `used*` counts include a live attempt: an entry is spent when it
+ * starts, not when it finishes. A counter is only populated when the
+ * matching cap is set — an uncapped event reports `0` used and `null`
+ * max. `remaining` is the tightest configured cap, `null` when the
+ * event caps nothing.
+ */
+export interface AttemptQuota {
+  /** Attempts allowed for the whole window; null = unlimited. */
+  maxPerWindow: number | null;
+  usedInWindow: number;
+  /** Attempts allowed per local calendar day; null = unlimited. */
+  maxPerDay: number | null;
+  usedToday: number;
+  /** What the player can still start now; null = unlimited. */
+  remaining: number | null;
+}
+
 export interface EventListing {
   eventKey: string;
   /**
@@ -483,6 +504,13 @@ export interface EventListing {
 
   /** Reward policy summary with inline bundle previews. */
   rewardPolicy?: RewardPolicySummary;
+
+  /**
+   * Attempts spent vs. allowed for this player. Absent on backends
+   * older than the attempt-quota field; a modern backend always sets
+   * it (all-null maxima when the event caps nothing).
+   */
+  attemptQuota?: AttemptQuota;
 }
 
 /**

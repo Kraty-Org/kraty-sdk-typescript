@@ -94,6 +94,7 @@ export {
 } from './types.js';
 export type {
   Attempt,
+  AttemptQuota,
   AttemptStatus,
   BlockedPlayer,
   BoardStandings,

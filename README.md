@@ -23,13 +23,13 @@ repo against a tagged release. Each release ships compiled `dist/`
 artefacts so no build step is needed on your side.
 
 ```sh
-npm install github:PedroTrincheiras/kraty-sdk-typescript#v0.24.0
+npm install github:Kraty-Org/kraty-sdk-typescript#v0.25.0
 # or with pnpm:
-pnpm add github:PedroTrincheiras/kraty-sdk-typescript#v0.24.0
+pnpm add github:Kraty-Org/kraty-sdk-typescript#v0.25.0
 ```
 
 Browse releases at
-<https://github.com/PedroTrincheiras/kraty-sdk-typescript/releases>.
+<https://github.com/Kraty-Org/kraty-sdk-typescript/releases>.
 Once we publish to npm (v1.0) you'll be able to swap to `pnpm add @kraty/sdk`.
 
 For a future published version: `pnpm add @kraty/sdk`.
