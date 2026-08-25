@@ -10,11 +10,13 @@ import {
   LeaderboardsClient,
   LobbiesClient,
   PlayersClient,
+  PurchasesClient,
   WalletClient,
   pollLobbyUntilActive,
   pollPendingGrants,
 } from './resources.js';
 import type { SecretStore } from './secret-store.js';
+import type { TrackPurchaseInput, TrackPurchaseResult } from './types.js';
 
 export { KratyClient } from './client.js';
 export type { KratyClientOptions, RetryConfig, RequestInfo, ServerTime } from './client.js';
@@ -28,6 +30,7 @@ export {
   LeaderboardsClient,
   LobbiesClient,
   PlayersClient,
+  PurchasesClient,
   WalletClient,
   pollLobbyUntilActive,
   pollPendingGrants,
@@ -148,6 +151,9 @@ export type {
   PlayerWalletHolding,
   ProgressInput,
   ProgressResponse,
+  PurchaseProductType,
+  PurchaseStore,
+  PurchaseValidationStatus,
   SendFriendRequestResult,
   SendGiftInput,
   RewardBundlePreview,
@@ -157,6 +163,8 @@ export type {
   StandingsScope,
   StandingsSegment,
   StartAttemptResponse,
+  TrackPurchaseInput,
+  TrackPurchaseResult,
 } from './types.js';
 
 /**
@@ -181,6 +189,7 @@ export class Kraty {
   readonly inventory: InventoryClient;
   readonly wallet: WalletClient;
   readonly players: PlayersClient;
+  readonly purchases: PurchasesClient;
   readonly friends: FriendsClient;
   readonly catalog: CatalogClient;
 
@@ -194,8 +203,38 @@ export class Kraty {
     this.inventory = new InventoryClient(this.client);
     this.wallet = new WalletClient(this.client);
     this.players = new PlayersClient(this.client);
+    this.purchases = new PurchasesClient(this.client);
     this.friends = new FriendsClient(this.client);
     this.catalog = new CatalogClient(this.client);
+  }
+
+  /**
+   * Record a real-money purchase for the active player.
+   *
+   * Shorthand for `kraty.purchases.track(...)`, promoted to the top
+   * level because reporting a purchase is a one-liner a game does from
+   * inside its store callback and shouldn't have to reach through a
+   * namespace for.
+   *
+   * ```ts
+   * await kraty.trackPurchase({
+   *   transactionId: storeTx.id,
+   *   store: 'app_store',
+   *   productId: 'gems_500',
+   *   amountMinor: 499,   // $4.99 — minor units, as charged
+   *   currency: 'USD',
+   *   receipt: storeTx.receipt,
+   * });
+   * ```
+   *
+   * Idempotent on `transactionId`, so calling it on every restore
+   * without tracking what you already reported is the intended usage.
+   */
+  async trackPurchase(
+    input: TrackPurchaseInput,
+    opts: { as?: string } = {},
+  ): Promise<TrackPurchaseResult> {
+    return this.purchases.track(input, opts);
   }
 
   /**

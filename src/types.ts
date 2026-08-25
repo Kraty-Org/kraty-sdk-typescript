@@ -687,6 +687,91 @@ export interface ConsumeItemResult {
 }
 
 /**
+ * Which storefront a purchase came from. `other` is the escape hatch
+ * so an unenumerated store never blocks ingest.
+ */
+export type PurchaseStore =
+  | 'app_store'
+  | 'google_play'
+  | 'steam'
+  | 'epic'
+  | 'amazon'
+  | 'microsoft'
+  | 'playstation'
+  | 'nintendo'
+  | 'web'
+  | 'other';
+
+export type PurchaseProductType = 'consumable' | 'non_consumable' | 'subscription';
+
+/**
+ * Server-side receipt validation state. Everything Kraty ingests today
+ * lands `unverified` (or `skipped` for stores with no validation API);
+ * a future validation pass flips it to `verified` / `failed`.
+ */
+export type PurchaseValidationStatus = 'unverified' | 'verified' | 'failed' | 'skipped';
+
+/**
+ * Input for `PurchasesClient.track` (a.k.a. `kraty.trackPurchase`).
+ *
+ * `amountMinor` is in the currency's MINOR units as charged — cents for
+ * USD, whole yen for JPY. Every store SDK already reports minor units,
+ * so pass theirs through unchanged rather than converting to a float.
+ *
+ * No `idempotencyKey`: `transactionId` IS the idempotency key, and it
+ * comes from the store rather than being invented by the caller. Call
+ * this as many times as you like for one transaction — a replay
+ * records nothing new and moves no total.
+ */
+export interface TrackPurchaseInput {
+  /** The store's transaction id. Used for dedupe. */
+  transactionId: string;
+  store: PurchaseStore;
+  /** The store's product id / SKU. */
+  productId: string;
+  productType?: PurchaseProductType;
+  /** Minor units as charged: `499` is $4.99 in USD, ¥499 in JPY. */
+  amountMinor: number;
+  /** ISO 4217 alpha-3, e.g. `'USD'`, `'BRL'`, `'JPY'`. */
+  currency: string;
+  /** Store receipt / purchase token, retained for later validation. */
+  receipt?: string;
+  /** ISO-8601. Defaults to the server's clock when omitted. */
+  purchasedAt?: string;
+  /** Arbitrary studio fields: campaign id, offer id, A/B bucket, … */
+  metadata?: Record<string, unknown>;
+}
+
+/**
+ * Result of `trackPurchase`. Carries both what the player was charged
+ * (`amountMinor` + `currency`) and the normalized USD value
+ * (`normalizedAmountMinor`, always USD cents) that spend thresholds
+ * and revenue reporting compare against.
+ */
+export interface TrackPurchaseResult {
+  purchaseId: string;
+  transactionId: string;
+  store: PurchaseStore;
+  productId: string;
+  productType: PurchaseProductType | null;
+  amountMinor: number;
+  currency: string;
+  /** USD cents. */
+  normalizedAmountMinor: number;
+  /** Always `'USD'`. Present so callers never hardcode the base currency. */
+  normalizedCurrency: string;
+  fxRate: number;
+  validationStatus: PurchaseValidationStatus;
+  purchasedAt: string;
+  metadata: Record<string, unknown>;
+  /** True when this transaction id was already on file — a replay, not an error. */
+  deduplicated: boolean;
+  /** The player's lifetime spend in USD cents, after this purchase. */
+  lifetimeAmountMinor: number;
+  purchaseCount: number;
+}
+
+/**
  * Input for `WalletClient.debit`. Same idempotency story as
  * `ConsumeItemInput`. Credits are intentionally NOT in the client
  * SDK; only the studio's backend (`/server/v1/...`) can mint

@@ -53,6 +53,8 @@ import type {
   ProgressResponse,
   StartAttemptResponse,
   SyntheticIdentity,
+  TrackPurchaseInput,
+  TrackPurchaseResult,
 } from './types.js';
 
 /** Wrapper helper: every response from the SDK API is `{ data: T }`. */
@@ -711,6 +713,62 @@ export interface CollectAllResult {
  * `settings.inventoryManagement === 'platform'`. The SDK doesn't
  * expose grant / admin-credit endpoints; those are server-API only.
  */
+/**
+ * Real-money purchase reporting.
+ *
+ * Deliberately WRITE-ONLY. There is no client-side read of a player's
+ * spend total: it is a monetization signal worth keeping out of a
+ * shipped binary, and games that gate content on spend don't need it —
+ * the backend evaluates a `spend_at_least` unlock condition server-side
+ * and the event simply arrives locked or unlocked. Studios that want
+ * the number for their own UI read it through their backend
+ * (`GET /server/v1/players/:id/spend`).
+ */
+export class PurchasesClient {
+  constructor(private readonly client: KratyClient) {}
+
+  /**
+   * POST /sdk/v1/players/:p/purchases: record a real-money purchase
+   * for the active player.
+   *
+   * Call it the moment your store SDK confirms the transaction. Safe to
+   * call repeatedly for the same `transactionId` — restores,
+   * retries-after-timeout, and app relaunches all collapse onto one
+   * ledger row, and the result's `deduplicated` flag tells you which
+   * happened. That means you can call it unconditionally on every
+   * restore without tracking what you've already reported.
+   *
+   * ```ts
+   * const result = await kraty.trackPurchase({
+   *   transactionId: storeTx.id,
+   *   store: 'google_play',
+   *   productId: 'com.studio.game.gems_500',
+   *   productType: 'consumable',
+   *   amountMinor: 2990,      // R$29.90 — minor units, as charged
+   *   currency: 'BRL',
+   *   receipt: storeTx.purchaseToken,
+   * });
+   * // result.normalizedAmountMinor === 520  ($5.20)
+   * ```
+   *
+   * Throws `KratyApiError` with code `unknown_currency` if Kraty holds
+   * no FX rate for `currency`. That is a configuration gap rather than
+   * a player problem — surface it in QA, don't retry.
+   */
+  async track(
+    input: TrackPurchaseInput,
+    opts: { as?: string } = {},
+  ): Promise<TrackPurchaseResult> {
+    const externalPlayerId = await resolvePlayerId(this.client, opts.as, 'purchases.track');
+    const env = await this.client.request<DataEnvelope<TrackPurchaseResult>>(
+      'POST',
+      `/sdk/v1/players/${encodeURIComponent(externalPlayerId)}/purchases`,
+      input,
+    );
+    return env.data;
+  }
+}
+
 export class InventoryClient {
   constructor(private readonly client: KratyClient) {}
 
