@@ -163,6 +163,7 @@ export type {
   StandingsScope,
   StandingsSegment,
   StartAttemptResponse,
+  Suggestion,
   TrackPurchaseInput,
   TrackPurchaseResult,
 } from './types.js';

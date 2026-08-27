@@ -4,6 +4,18 @@ All notable changes to `@kraty/sdk` (Kraty TypeScript SDK) live here.
 Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) +
 [SemVer](https://semver.org/).
 
+## [0.29.0](https://github.com/Kraty-Org/Kraty/compare/sdk-client-typescript-v0.28.0...sdk-client-typescript-v0.29.0) (2026-08-27)
+
+
+### Features
+
+* **friends:** friend suggestions endpoint + all client SDKs ([#76](https://github.com/Kraty-Org/Kraty/issues/76)) ([2b1715c](https://github.com/Kraty-Org/Kraty/commit/2b1715c346f8a391f1bb169af5229f329ce51947))
+
+
+### Documentation
+
+* **sdks:** bump install snippets — clients v0.28.0, server-ts v0.18.0, server-py v0.17.0 ([#69](https://github.com/Kraty-Org/Kraty/issues/69)) ([8974116](https://github.com/Kraty-Org/Kraty/commit/8974116334ff7c2c303bf1e0ddbe16f214fece60))
+
 ## [0.28.0](https://github.com/Kraty-Org/Kraty/compare/sdk-client-typescript-v0.27.0...sdk-client-typescript-v0.28.0) (2026-08-26)
 
 

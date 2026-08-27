@@ -34,6 +34,7 @@ import type {
   SendGiftInput,
   Grant,
   GrantSelfInput,
+  Suggestion,
   Leaderboard,
   LeaderboardPeriods,
   LeaderboardReadOptions,
@@ -1215,6 +1216,30 @@ export class FriendsClient {
       `/sdk/v1/players/${encodeURIComponent(externalPlayerId)}/friends/search?${params.toString()}`,
     );
     return env.data.results;
+  }
+
+  /**
+   * GET `/friends/suggestions`: "people you may want to add" — recently-active
+   * players in the same game + environment the caller isn't already related to
+   * (not a friend, no pending request either way, not blocked). Returns a
+   * weighted-random sample biased toward the most recently active, so calling
+   * it again surfaces a different set. `limit` defaults to 5 (clamped 1–25).
+   */
+  async suggestions(
+    opts: { limit?: number; progression?: string[]; as?: string } = {},
+  ): Promise<Suggestion[]> {
+    const externalPlayerId = await resolvePlayerId(this.client, opts.as, 'friends.suggestions');
+    const params = new URLSearchParams();
+    if (opts.limit !== undefined) params.set('limit', String(opts.limit));
+    if (opts.progression?.length) params.set('progression', opts.progression.join(','));
+    const qs = params.toString();
+    const env = await this.client.request<DataEnvelope<{ suggestions: Suggestion[] }>>(
+      'GET',
+      `/sdk/v1/players/${encodeURIComponent(externalPlayerId)}/friends/suggestions${
+        qs ? `?${qs}` : ''
+      }`,
+    );
+    return env.data.suggestions;
   }
 
   /**

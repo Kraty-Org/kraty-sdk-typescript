@@ -849,6 +849,25 @@ export interface Friend {
   giftCooldownUntil?: string;
 }
 
+/**
+ * A suggested player to add — a recently-active non-friend the caller has
+ * no relationship with. Same identity + live-presence shape as `Friend`,
+ * minus the friendship-specific `friendsSince` / `giftCooldownUntil`
+ * (there's no edge yet). Returned by `friends.suggestions()`.
+ */
+export interface Suggestion {
+  externalPlayerId: string;
+  displayIdentity: PlayerIdentity | null;
+  online: boolean;
+  /** ISO timestamp of their last heartbeat, or null when never/expired. */
+  lastActiveAt: string | null;
+  /** Free-form client-set status ("in_match", "lobby", …), or null. */
+  status: string | null;
+  /** Progression balances requested via
+   *  `friends.suggestions({ progression: [...] })`, e.g. `{ level: 12 }`. */
+  progression?: Record<string, number>;
+}
+
 /** The caller's shareable friend code + display identity. */
 export interface FriendCode {
   friendCode: string;

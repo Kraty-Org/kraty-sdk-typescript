@@ -138,6 +138,32 @@ describe('FriendsClient', () => {
     expect(calls[0]?.url).toContain('limit=5');
   });
 
+  it('suggestions hits the suggestions path with limit and progression', async () => {
+    const { fetch, calls } = makeFetch([
+      () =>
+        jsonRes(200, {
+          data: {
+            suggestions: [
+              {
+                externalPlayerId: 'carol',
+                displayIdentity: { name: 'Carol', avatar: null, country: null },
+                online: false,
+                lastActiveAt: null,
+                status: null,
+              },
+            ],
+          },
+        }),
+    ]);
+    const k = new Kraty(baseOpts(fetch));
+    const suggestions = await k.friends.suggestions({ limit: 5, progression: ['level'] });
+    expect(suggestions).toHaveLength(1);
+    expect(suggestions[0]?.externalPlayerId).toBe('carol');
+    expect(calls[0]?.url).toContain('/sdk/v1/players/alice/friends/suggestions');
+    expect(calls[0]?.url).toContain('limit=5');
+    expect(calls[0]?.url).toContain('progression=level');
+  });
+
   it('accept POSTs to the accept sub-path and returns the friend', async () => {
     const { fetch, calls } = makeFetch([
       () =>
