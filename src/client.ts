@@ -29,7 +29,7 @@ import {
  * not a contract break.
  */
 const SDK_NAME = '@kraty/sdk';
-const SDK_VERSION = '0.19.0';
+const SDK_VERSION = '0.30.0';
 const SDK_USER_AGENT = `${SDK_NAME}/${SDK_VERSION}`;
 
 /**
@@ -102,6 +102,21 @@ export interface KratyClientOptions {
   generateIdempotencyKey?: () => string;
   /** Hook fired after every request; useful for telemetry. */
   onRequest?: (info: RequestInfo) => void;
+  /**
+   * Platform this client runs on, sent as `X-Kraty-Platform` on every
+   * request so the dashboard can split players by device. Built-in keys
+   * are `ios`, `android`, `web`, `windows`, `macos`, `linux`, `editor`; any
+   * other key must be defined in the game's Settings → Platforms. When
+   * omitted the SDK reports `web` in a browser and nothing elsewhere — a
+   * React Native app should pass `Platform.OS` here.
+   */
+  platform?: string;
+  /**
+   * Your game's build version (`1.4.2`), sent as `X-Kraty-App-Version` on
+   * every request and shown on the player's profile. The SDK has no
+   * universal way to read it, so pass it from your build config.
+   */
+  appVersion?: string;
 }
 
 export interface RetryConfig {
@@ -174,6 +189,27 @@ function monotonicNowMs(): number {
   return typeof perf?.now === 'function' ? perf.now() : Date.now();
 }
 
+/** Same slug rule the backend applies; anything else is dropped, not sent. */
+const PLATFORM_KEY = /^[a-z0-9][a-z0-9_-]{0,31}$/;
+
+function normalizePlatform(raw: string | undefined): string | null {
+  if (!raw) return null;
+  const key = raw.trim().toLowerCase();
+  return PLATFORM_KEY.test(key) ? key : null;
+}
+
+/**
+ * Best-effort runtime detection. A browser is unambiguously `web`; Node,
+ * workers, and React Native (whose `navigator` is not a browser's) report
+ * nothing rather than guess, so `opts.platform` is the way to name them.
+ */
+function detectPlatform(): string | null {
+  const g = globalThis as { document?: unknown; navigator?: { product?: string } };
+  if (g.navigator?.product === 'ReactNative') return null;
+  if (typeof g.document !== 'undefined') return 'web';
+  return null;
+}
+
 export class KratyClient {
   private readonly _baseUrl: string;
   private readonly timeoutMs: number;
@@ -192,6 +228,9 @@ export class KratyClient {
   private readonly _finalization: FinalizationTracker;
   private readonly generateIdempotencyKey: () => string;
   private readonly onRequest?: (info: RequestInfo) => void;
+  // Device telemetry headers (see KratyClientOptions.platform / appVersion).
+  private readonly _platform: string | null;
+  private readonly _appVersion: string | null;
   // Inflight register dedupe: concurrent first-touch calls on a
   // freshly-constructed client share the same registration so we
   // don't fire two POST /register against the server.
@@ -223,6 +262,8 @@ export class KratyClient {
     this._secretStore = opts.secretStore ?? defaultSecretStore();
     this.generateIdempotencyKey = opts.generateIdempotencyKey ?? defaultIdempotencyKey;
     if (opts.onRequest) this.onRequest = opts.onRequest;
+    this._platform = normalizePlatform(opts.platform) ?? detectPlatform();
+    this._appVersion = opts.appVersion?.trim() || null;
     this._finalization = new FinalizationTracker({
       store: opts.membershipStore ?? defaultMembershipStore(),
       // Never force-register during catch-up: only the current active player.
@@ -587,6 +628,8 @@ export class KratyClient {
           authorization: this._authHeader,
           accept: 'application/json',
           'x-kraty-sdk': SDK_USER_AGENT,
+          ...(this._platform ? { 'x-kraty-platform': this._platform } : {}),
+          ...(this._appVersion ? { 'x-kraty-app-version': this._appVersion } : {}),
           ...(this._playerSecret ? { 'x-player-secret': this._playerSecret } : {}),
           ...(body !== undefined ? { 'content-type': 'application/json' } : {}),
         },
