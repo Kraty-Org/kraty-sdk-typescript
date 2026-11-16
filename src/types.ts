@@ -884,8 +884,15 @@ export interface TrackPurchaseInput {
   receipt?: string;
   /** ISO-8601. Defaults to the server's clock when omitted. */
   purchasedAt?: string;
-  /** Arbitrary studio fields: campaign id, offer id, A/B bucket, … */
+  /** Arbitrary studio fields: campaign id, A/B bucket, … */
   metadata?: Record<string, unknown>;
+  /**
+   * The offer this purchase was made from: `instanceId` of the `Offer`
+   * from `kraty.offers.list()`. Only a purchase carrying it can advance the
+   * offer (and, when the offer opted in, have Kraty grant its contents);
+   * without it the SKU is matched for revenue reporting only.
+   */
+  offerInstanceId?: string;
 }
 
 /**
@@ -915,6 +922,202 @@ export interface TrackPurchaseResult {
   /** The player's lifetime spend in USD cents, after this purchase. */
   lifetimeAmountMinor: number;
   purchaseCount: number;
+  /**
+   * The offer this purchase was attributed to, or null. When
+   * `offer.studioFulfils` is true, deliver `offer.contents` yourself.
+   * Optional so an older backend still type-checks.
+   */
+  offer?: PurchaseOfferResult | null;
+}
+
+// ── Offers (docs/26) ──
+
+/** Instance state of an offer as the client sees it. */
+export type OfferState =
+  | 'available'
+  | 'shown'
+  | 'pending_verification'
+  | 'purchased'
+  | 'completed'
+  | 'dismissed'
+  | 'expired';
+
+/**
+ * `'paid'`: sold through the store. `'free'` (chain offers): claimed with
+ * `kraty.offers.claim`, never through a store.
+ */
+export type OfferTierType = 'paid' | 'free';
+
+/** One step of an offer: what to sell (or, when free, claim) now (`current`) or next (`next`). */
+export interface OfferTier {
+  index: number;
+  type: OfferTierType;
+  /** Null for a free tier. */
+  storeProductKey: string | null;
+  /** Store → SKU, e.g. `{ app_store: 'com.game.starter499' }`. Sell the SKU of your store. `{}` for a free tier. */
+  skus: Record<string, string>;
+  /** Reference USD price in cents (display fallback; the store price is what the player pays). 0 for a free tier. */
+  referencePriceMinor: number;
+  /** The reward entries the tier contains, as configured. */
+  contents: Array<Record<string, unknown>>;
+  label: string | Record<string, string> | null;
+  valueLabel: string | null;
+}
+
+/**
+ * One offer instance for the active player (`GET /sdk/v1/players/:p/offers`).
+ * Pass `instanceId` as `offerInstanceId` to `trackPurchase` when the player buys.
+ */
+export interface Offer {
+  instanceId: string;
+  offerKey: string;
+  kind: string;
+  name: string | Record<string, string>;
+  description: string | Record<string, string> | null;
+  state: OfferState;
+  tier: number;
+  tierCount: number;
+  current: OfferTier;
+  /** Chain offers: the next, still locked tier (a preview); null otherwise. */
+  next: OfferTier | null;
+  /** Server-anchored close time (ISO); the backstop before the first impression. */
+  expiresAt: string | null;
+  /** Chain offers: when the current tier's timer runs out. */
+  tierExpiresAt: string | null;
+  /** The offer closes when the session ends. */
+  endsWithSession: boolean;
+  purchasesRemaining: number | null;
+  presentation: { layout?: string; badge?: string; artKey?: string };
+  /**
+   * The A/B variant this player sees (`current`, `next` and `presentation`
+   * already reflect it), for your analytics; null for the base configuration.
+   */
+  variantKey: string | null;
+  /**
+   * The linked event's key when the offer is event-linked (a sale while it is
+   * live, or a post-event offer): show it on that event's screen. Else null.
+   */
+  linkedEventKey: string | null;
+}
+
+/**
+ * Why an impression was refused: `offer_cycle` / `offer_day` are the offer's
+ * own caps; `global_session` / `global_day` / `global_gap` the game-wide
+ * fatigue caps (per session, per UTC day, minimum gap between two offers).
+ */
+export type OfferCapReason = 'offer_cycle' | 'offer_day' | 'global_session' | 'global_day' | 'global_gap';
+
+/** Result of `kraty.offers.markShown`. */
+export interface OfferImpressionResult {
+  offer: Offer;
+  /** True for the impression that started the offer's timer. */
+  firstImpression: boolean;
+  /**
+   * True when a cap refused this impression: don't show the offer. Re-rendering
+   * an offer already shown this session is never refused by the game-wide caps.
+   */
+  capped: boolean;
+  /** Why (`capped` true), else null. */
+  cappedReason: OfferCapReason | null;
+  /**
+   * When the same impression could succeed (ISO), when known: `global_gap` →
+   * the last impression + the gap; `global_day` / `offer_day` → the next UTC
+   * midnight. Null otherwise.
+   */
+  retryAt: string | null;
+}
+
+/**
+ * One free chain tier claim (`OfferClaimResult.claim`). Exactly one of
+ * `granted` / `studioFulfils` is true: when Kraty granted, the contents
+ * arrive as a grant; otherwise the game delivers `contents` itself.
+ */
+export interface OfferClaim {
+  claimId: string;
+  offerId: string;
+  offerKey: string;
+  instanceId: string;
+  tier: number;
+  contents: Array<Record<string, unknown>>;
+  granted: boolean;
+  grantId: string | null;
+  studioFulfils: boolean;
+  claimedAt: string;
+  /** The A/B variant whose contents were claimed; null for the base configuration. */
+  variantKey: string | null;
+}
+
+/** Result of `kraty.offers.claim`: the claim and the offer after it. */
+export interface OfferClaimResult {
+  claim: OfferClaim;
+  /** The next tier is current with a fresh timer, or the state is `completed`. */
+  offer: Offer;
+}
+
+/** `details.reason` of a refused claim (`KratyError` with `code: 'conflict'`). */
+export type OfferClaimRefusalReason = 'tier_changed' | 'tier_not_free' | 'offer_closed';
+
+/**
+ * What `kraty.offers.trigger` reports happened in the game:
+ *  - `fail_event`: a fail (`key`, e.g. `level_failed`), with `consecutive`
+ *    fails in a row including this one (default 1). Revenge offers;
+ *  - `resource_depleted`: the player tried an action needing `required` of
+ *    `resource` (a currency or item key) and has `available`;
+ *    `secondsToRegen` is when a free refill arrives, if one does. Top-ups;
+ *  - `level_reached`: the player's level now.
+ */
+export type OfferTriggerInput =
+  | { type: 'fail_event'; key: string; consecutive?: number }
+  | {
+      type: 'resource_depleted';
+      resource: string;
+      required: number;
+      available: number;
+      secondsToRegen?: number;
+    }
+  | { type: 'level_reached'; level: number };
+
+/** Result of `kraty.offers.trigger`. */
+export interface OfferTriggerResult {
+  /** The offers this trigger armed that can be shown now; empty when none did. */
+  offers: Offer[];
+}
+
+/** The offer a purchase was attributed to (`TrackPurchaseResult.offer`). */
+export interface PurchaseOfferResult {
+  offerId: string;
+  offerKey: string;
+  instanceId: string | null;
+  tier: number | null;
+  /** `explicit`: the purchase carried `offerInstanceId`. `inferred`: matched by SKU, revenue only. */
+  method: 'explicit' | 'inferred';
+  status: 'attributed' | 'pending_verification' | 'granted' | 'refused' | 'disputed' | 'failed';
+  /** The instance state after the purchase; null for inferred. */
+  state: OfferState | 'holdout' | null;
+  /** Kraty granted the contents (they arrive as a grant). */
+  granted: boolean;
+  /** Kraty will grant once a verified report of the purchase arrives. */
+  pendingVerification: boolean;
+  /** The game delivers `contents` itself (the offer's default). */
+  studioFulfils: boolean;
+  /** What the player bought (explicit only). */
+  contents: Array<Record<string, unknown>> | null;
+  validationStatus: 'verified' | 'unverified' | 'skipped';
+  /** The A/B variant whose price and contents were sold; null for the base configuration. */
+  variantKey: string | null;
+}
+
+/** Store fields `canonicalTransactionId` picks from. */
+export interface StoreTransactionIds {
+  store: PurchaseStore;
+  /** App Store: StoreKit 2 `transactionId`. Other stores: their transaction id. */
+  transactionId?: string;
+  /** App Store `originalTransactionId`; never used as the id. */
+  originalTransactionId?: string;
+  /** Google Play `orderId` (`GPA.…`). */
+  orderId?: string;
+  /** Google Play `purchaseToken`; used only when there is no `orderId` (test purchases). */
+  purchaseToken?: string;
 }
 
 /**

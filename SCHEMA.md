@@ -180,6 +180,69 @@ read(opts?: { as?: string }): Promise<DailyLogin | null>
 has none or it is off for the key's environment. Read-only: the request's
 session is what pays today's reward (a `daily_login` grant).
 
+## `kraty.offers`: `OffersClient`
+
+```ts
+list(opts?: { limit?: number; level?: number; as?: string }): Promise<Offer[]>
+markShown(instanceId: string, opts?: { idempotencyKey?: string; as?: string }): Promise<OfferImpressionResult>
+dismiss(instanceId: string, opts?: { idempotencyKey?: string; as?: string }): Promise<Offer>
+trigger(input: OfferTriggerInput, opts?: { playerContext?: Record<string, unknown>; idempotencyKey?: string; as?: string }): Promise<OfferTriggerResult>
+claim(instanceId: string, opts: { tier: number; idempotencyKey?: string; as?: string }): Promise<OfferClaimResult>
+```
+
+`GET /sdk/v1/players/:p/offers` (`limit` ≤ 20, default 10; `level` for
+`level_reached` offers), `POST …/offers/:instanceId/impression` and
+`…/dismiss`. Listing is not an impression: call `markShown` when the offer
+is on screen (it starts a `first_shown` timer; `expiresAt` is fixed after
+the first one). The SDK generates `idempotencyKey` when omitted. Sell
+`offer.current.skus[store]` and pass `offer.instanceId` as
+`offerInstanceId` to `trackPurchase`; when the result's
+`offer.studioFulfils` is true (the offer is set to game delivers; by default Kraty delivers, so do not grant it too) the game delivers
+`offer.contents` itself.
+
+`trigger` is `POST …/offers/triggers` with `{ idempotencyKey, trigger,
+playerContext? }`: report a fail (`{ type: 'fail_event', key, consecutive? }`,
+revenge offers), a depleted resource (`{ type: 'resource_depleted', resource,
+required, available, secondsToRegen? }`, top-ups sized to the shortfall) or a
+level (`{ type: 'level_reached', level }`). It answers `{ offers }`, the newly
+armed offers that can be shown now (empty when none did). Win-back offers need
+no call: they arm when a session opens after a break.
+
+Free chain tiers: `OfferTier.type` is `'paid' | 'free'`. A free tier has
+`storeProductKey: null`, `skus: {}` and `referencePriceMinor: 0`; never send
+it to a store. `claim` is `POST …/offers/:instanceId/claim` with
+`{ idempotencyKey, tier }` (`tier` = the `offer.tier` the player tapped) and
+answers `OfferClaimResult { claim: OfferClaim, offer }`: the chain moves to
+the next tier (its timer starts now) or completes. When
+`claim.studioFulfils` is true (the offer is set to game delivers; by default Kraty delivers, so do not grant it too) the game delivers
+`claim.contents`; when `claim.granted` it arrives as a grant. A refusal
+throws `KratyApiError` with `code: 'conflict'`, `details.reason`
+(`OfferClaimRefusalReason`: `tier_changed`, `tier_not_free`,
+`offer_closed`) and `details.offer`, the offer now. `next` is a preview,
+never a buy button: claim the free step before selling the paid one after
+it. Builds on an older SDK can't claim free steps (their store call fails;
+nothing is charged).
+
+Revision 4 (docs/26 § 13): `Offer.variantKey` is the A/B variant this player
+sees (`current`, `next` and `presentation` already reflect it; null for the
+base config), for your analytics; `Offer.linkedEventKey` is the key of the
+event an event-linked offer belongs to (a sale while it is live, or a
+post-event offer), so you can show it on that event's screen.
+`OfferClaim.variantKey` and `PurchaseOfferResult.variantKey` name the variant
+claimed or sold. `markShown` answers `capped` with `cappedReason`
+(`OfferCapReason`: `offer_cycle`, `offer_day` for the offer's own caps;
+`global_session`, `global_day`, `global_gap` for the game-wide fatigue caps)
+and `retryAt` (the gap's end, or the next UTC midnight). Respect `capped`:
+don't show the offer. Re-rendering an offer already shown this session is
+never refused by the game-wide caps, and the list already holds back offers
+the caps would refuse.
+
+`canonicalTransactionId({ store, transactionId?, orderId?, purchaseToken? })`
+returns the id to report as `transactionId`: StoreKit 2 `transactionId`
+(never `originalTransactionId`), Google Play `orderId` (`purchaseToken`
+only without one), other stores unchanged. Client and server must report
+the same id for one transaction.
+
 ## `kraty.guilds`: `GuildsClient`
 
 ```ts
@@ -254,7 +317,12 @@ LocalStorageSecretStore   // browsers, wraps window.localStorage
 `PlayerContext`, `TeamSeatView`, `TeamClientOptions`, `TeamSeatMilestone`, `TeamSeatState`,
 `TeamRollup`, `LeaderboardEntryTeam`, `EventTeamMember`, `EventTeamMembersPage`,
 `TeamMatchResult`, `PartnerPlayer`, `PartnerInvite`, `RandomPartnerResult`,
-`PartnerSuggestion`.
+`PartnerSuggestion`, `Offer`, `OfferTier`, `OfferTierType`, `OfferState`, `OfferImpressionResult`,
+`OfferTriggerInput`, `OfferTriggerResult`, `OfferClaim`, `OfferClaimResult`,
+`OfferClaimRefusalReason`, `PurchaseOfferResult`, `StoreTransactionIds`.
+
+`TrackPurchaseInput` has `offerInstanceId?`; `TrackPurchaseResult` has
+`offer?: PurchaseOfferResult | null`.
 
 ## Errors
 

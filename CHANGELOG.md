@@ -4,6 +4,25 @@ All notable changes to `@kraty/sdk` (Kraty TypeScript SDK) live here.
 Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) +
 [SemVer](https://semver.org/).
 
+## Unreleased
+
+### Features
+
+* **offers:** `kraty.offers` (`OffersClient`): `list({ limit?, level? })`, `markShown(instanceId)` and `dismiss(instanceId)` for real-money offers (docs/26). `trackPurchase` takes `offerInstanceId` and its result carries `offer` (`PurchaseOfferResult`, null when the purchase isn't attributed). New `canonicalTransactionId()` helper picks the store id client and server must both report (StoreKit 2 `transactionId`, Google Play `orderId`).
+* **offers:** `kraty.offers.trigger(input, { playerContext? })` reports a fail (`fail_event`), a depleted resource (`resource_depleted`) or a level (`level_reached`) and answers the newly armed offers (`OfferTriggerResult`). New types `OfferTriggerInput` and `OfferTriggerResult`.
+* **offers:** free chain tiers. `kraty.offers.claim(instanceId, { tier })` claims the current free step of a chain offer (no store, never revenue) and answers `OfferClaimResult { claim, offer }`; a refusal is a `conflict` error with `details.reason` (`tier_changed`, `tier_not_free`, `offer_closed`). `OfferTier` gains `type: 'paid' | 'free'`, and `storeProductKey` is now `string | null` (null on a free tier, with `skus: {}` and `referencePriceMinor: 0`). New types `OfferTierType`, `OfferClaim`, `OfferClaimResult`, `OfferClaimRefusalReason`. Game builds on an older SDK can't claim free steps: they see a tier with no SKU, the store call fails and nothing is charged.
+* **offers:** Revision 4 (additive). `Offer` gains `variantKey` (the A/B variant the player sees; `current`, `next` and `presentation` already reflect it, for your analytics) and `linkedEventKey` (the event an event-linked offer belongs to, so you can show the sale on that event's screen); `OfferClaim.variantKey` and `PurchaseOfferResult.variantKey` name the variant that was claimed or sold. `markShown` returns `cappedReason` (new `OfferCapReason`: `offer_cycle`, `offer_day`, `global_session`, `global_day`, `global_gap`) and `retryAt`. Respect `capped`: the game-wide fatigue caps refuse an impression when the player has seen enough offers this session or day, and `retryAt` says when the gap between two offers has passed. Re-renders of an offer already shown this session are never refused. All fields are always present (null when unused); older SDK builds ignore them.
+* **offers:** delivery default, no API change. New offers default to Kraty delivering their contents (`delivery.grantContents: true`): Kraty grants them (`offer.granted`, `grant.created`; `offer.pendingVerification` until your server reports the purchase verified, test players on test keys at once) and `offer.studioFulfils` is false, so the game must not grant them too. Deliver `offer.contents` / `claim.contents` yourself only when `studioFulfils` is true (offers switched to "Game delivers"). Existing offers keep their setting.
+* **events:** new server-side gate reasons, no API change. Events and offers can gate on in-game currency the player spent (`currency_spent_at_least`) and on days since install (`days_since_install_at_least`); a refused `start` carries `unlock_condition_failed` / `entry_requirement_failed` as before, with a message like `spent 12,500 / 1,000,000 diamonds` or `installed 12 / 100 days ago`. The rules are evaluated by Kraty only; nothing to send from the client.
+
+## [0.30.0](https://github.com/Kraty-Org/Kraty/compare/sdk-client-typescript-v0.29.2...sdk-client-typescript-v0.30.0) (2026-10-25)
+
+
+### Features
+
+* **offers:** monetization offers next to events ([edf6743](https://github.com/Kraty-Org/Kraty/commit/edf67439317ae0435bd38adc7015450558b3be0d))
+* **offers:** monetization offers next to events ([f6206e6](https://github.com/Kraty-Org/Kraty/commit/f6206e6e31fcd973b93f3ee591175d9e8c3b1e16))
+
 ## [0.29.2](https://github.com/Kraty-Org/Kraty/compare/sdk-client-typescript-v0.29.1...sdk-client-typescript-v0.29.2) (2026-10-16)
 
 

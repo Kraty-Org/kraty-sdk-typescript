@@ -77,6 +77,12 @@ import type {
   SyntheticIdentity,
   TrackPurchaseInput,
   TrackPurchaseResult,
+  Offer,
+  OfferClaimResult,
+  OfferImpressionResult,
+  OfferTriggerInput,
+  OfferTriggerResult,
+  StoreTransactionIds,
   CreateGuildInput,
   GuildClientConfig,
   GuildDetail,
@@ -959,7 +965,8 @@ export class PurchasesClient {
    *
    * ```ts
    * const result = await kraty.trackPurchase({
-   *   transactionId: storeTx.id,
+   *   // Google Play: the `orderId` (`GPA.…`), the same id your server reports.
+   *   transactionId: canonicalTransactionId({ store: 'google_play', orderId: storeTx.orderId }),
    *   store: 'google_play',
    *   productId: 'com.studio.game.gems_500',
    *   productType: 'consumable',
@@ -1702,6 +1709,160 @@ export class DailyLoginClient {
     );
     return env.data ?? null;
   }
+}
+
+/**
+ * Resource client for `/sdk/v1/players/:p/offers` (docs/26): real-money
+ * offers such as starter packs, bundles and chains.
+ *
+ * The flow: `list()` what to show; `markShown()` when an offer is actually
+ * on screen (that starts a "from first shown" timer, so don't call it for
+ * offers you only prefetched); sell `offer.current.skus[<your store>]`;
+ * then report the store transaction with `kraty.trackPurchase({ …,
+ * offerInstanceId: offer.instanceId })`. When the result's
+ * `offer.studioFulfils` is true (the offer is set to game delivers; by default Kraty delivers, so do not grant it too), deliver `offer.contents`
+ * yourself, as you fulfil any IAP.
+ */
+export class OffersClient {
+  constructor(private readonly client: KratyClient) {}
+
+  /**
+   * GET `/sdk/v1/players/:p/offers`: the offers to show now, highest
+   * priority first. `level` is the player's current level, for offers that
+   * trigger on reaching one. Listing is not an impression.
+   */
+  async list(opts: { limit?: number; level?: number; as?: string } = {}): Promise<Offer[]> {
+    const externalPlayerId = await resolvePlayerId(this.client, opts.as, 'offers.list');
+    const query = new URLSearchParams();
+    if (opts.limit !== undefined) query.set('limit', String(opts.limit));
+    if (opts.level !== undefined) query.set('level', String(opts.level));
+    const qs = query.toString();
+    const env = await this.client.request<DataEnvelope<Offer[]>>(
+      'GET',
+      `/sdk/v1/players/${encodeURIComponent(externalPlayerId)}/offers${qs ? `?${qs}` : ''}`,
+    );
+    return env.data;
+  }
+
+  /**
+   * POST `…/offers/:instanceId/impression`: the offer is on screen now.
+   * Idempotent (the SDK generates the key when you don't pass one).
+   * `capped: true` when a cap refused it: respect it and don't show the
+   * offer. `cappedReason` says which (`offer_*` = the offer's own caps,
+   * `global_*` = the game-wide fatigue caps) and `retryAt` when it could
+   * pass (the gap between two offers, or the next UTC midnight). Re-rendering
+   * an offer already shown this session is never refused by the game-wide
+   * caps.
+   */
+  async markShown(
+    instanceId: string,
+    opts: { idempotencyKey?: string; as?: string } = {},
+  ): Promise<OfferImpressionResult> {
+    const externalPlayerId = await resolvePlayerId(this.client, opts.as, 'offers.markShown');
+    const env = await this.client.request<DataEnvelope<OfferImpressionResult>>(
+      'POST',
+      this.instancePath(externalPlayerId, instanceId, '/impression'),
+      opts.idempotencyKey ? { idempotencyKey: opts.idempotencyKey } : {},
+    );
+    return env.data;
+  }
+
+  /** POST `…/offers/:instanceId/dismiss`: the player closed the offer without buying. */
+  async dismiss(
+    instanceId: string,
+    opts: { idempotencyKey?: string; as?: string } = {},
+  ): Promise<Offer> {
+    const externalPlayerId = await resolvePlayerId(this.client, opts.as, 'offers.dismiss');
+    const env = await this.client.request<DataEnvelope<Offer>>(
+      'POST',
+      this.instancePath(externalPlayerId, instanceId, '/dismiss'),
+      opts.idempotencyKey ? { idempotencyKey: opts.idempotencyKey } : {},
+    );
+    return env.data;
+  }
+
+  /**
+   * POST `…/offers/triggers`: report a fail, a depleted resource or a level
+   * so the offers listening to it arm. Answers the newly armed offers that
+   * can be shown now (`offers: []` when none did; they also show up on the
+   * next `list`). Idempotent (the SDK generates the key when you don't pass
+   * one). `playerContext` feeds offer eligibility.
+   */
+  async trigger(
+    input: OfferTriggerInput,
+    opts: { playerContext?: Record<string, unknown>; idempotencyKey?: string; as?: string } = {},
+  ): Promise<OfferTriggerResult> {
+    const externalPlayerId = await resolvePlayerId(this.client, opts.as, 'offers.trigger');
+    const body: Record<string, unknown> = { trigger: input };
+    if (opts.playerContext !== undefined) body['playerContext'] = opts.playerContext;
+    if (opts.idempotencyKey) body['idempotencyKey'] = opts.idempotencyKey;
+    const env = await this.client.request<DataEnvelope<OfferTriggerResult>>(
+      'POST',
+      `/sdk/v1/players/${encodeURIComponent(externalPlayerId)}/offers/triggers`,
+      body,
+    );
+    return env.data;
+  }
+
+  /**
+   * POST `…/offers/:instanceId/claim`: claim the current free tier of a
+   * chain offer (`offer.current.type === 'free'`). Pass the `tier` the
+   * player tapped (`offer.tier`). No store, no money. Answers the claim and
+   * the offer after it (the next tier, or `completed`). When
+   * `claim.studioFulfils` is true, deliver `claim.contents` yourself.
+   * Deliver each claim from one path only (this response or the
+   * `offer.tier_claimed` webhook), and de-duplicate on `claim.claimId`.
+   * Idempotent (the SDK generates the key when you don't pass one). A
+   * refusal throws `KratyError` with `code: 'conflict'` and
+   * `details.reason` (`tier_changed`, `tier_not_free`, `offer_closed`) plus
+   * `details.offer`, the offer now.
+   */
+  async claim(
+    instanceId: string,
+    opts: { tier: number; idempotencyKey?: string; as?: string },
+  ): Promise<OfferClaimResult> {
+    const externalPlayerId = await resolvePlayerId(this.client, opts.as, 'offers.claim');
+    const body: Record<string, unknown> = { tier: opts.tier };
+    if (opts.idempotencyKey) body['idempotencyKey'] = opts.idempotencyKey;
+    const env = await this.client.request<DataEnvelope<OfferClaimResult>>(
+      'POST',
+      this.instancePath(externalPlayerId, instanceId, '/claim'),
+      body,
+    );
+    return env.data;
+  }
+
+  private instancePath(externalPlayerId: string, instanceId: string, rest: string): string {
+    return `/sdk/v1/players/${encodeURIComponent(externalPlayerId)}/offers/${encodeURIComponent(instanceId)}${rest}`;
+  }
+}
+
+/**
+ * The `transactionId` to report for a store transaction (docs/22, docs/26
+ * § 5.0). Client and server must report the SAME id for one transaction,
+ * or the purchase is recorded twice:
+ *
+ *  - App Store: StoreKit 2 `transactionId`, never `originalTransactionId`;
+ *  - Google Play: `orderId` (`GPA.…`), falling back to `purchaseToken`
+ *    only for test purchases that have no `orderId`;
+ *  - other stores: their transaction id, unchanged.
+ *
+ * Throws when the store's id is missing.
+ */
+export function canonicalTransactionId(ids: StoreTransactionIds): string {
+  const pick = (v: string | undefined): string | undefined => (v && v.length > 0 ? v : undefined);
+  const id =
+    ids.store === 'google_play'
+      ? (pick(ids.orderId) ?? pick(ids.purchaseToken))
+      : pick(ids.transactionId);
+  if (!id) {
+    throw new Error(
+      ids.store === 'google_play'
+        ? 'canonicalTransactionId: google_play needs orderId (or purchaseToken for test purchases)'
+        : `canonicalTransactionId: ${ids.store} needs transactionId`,
+    );
+  }
+  return id;
 }
 
 /**

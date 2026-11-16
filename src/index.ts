@@ -12,6 +12,7 @@ import {
   InventoryClient,
   LeaderboardsClient,
   LobbiesClient,
+  OffersClient,
   ModerationClient,
   PlayersClient,
   PurchasesClient,
@@ -36,10 +37,12 @@ export {
   InventoryClient,
   LeaderboardsClient,
   LobbiesClient,
+  OffersClient,
   ModerationClient,
   PlayersClient,
   PurchasesClient,
   WalletClient,
+  canonicalTransactionId,
   pollLobbyUntilActive,
   pollPendingGrants,
 } from './resources.js';
@@ -235,6 +238,19 @@ export type {
   Suggestion,
   TrackPurchaseInput,
   TrackPurchaseResult,
+  Offer,
+  OfferClaim,
+  OfferClaimRefusalReason,
+  OfferClaimResult,
+  OfferCapReason,
+  OfferImpressionResult,
+  OfferState,
+  OfferTier,
+  OfferTierType,
+  OfferTriggerInput,
+  OfferTriggerResult,
+  PurchaseOfferResult,
+  StoreTransactionIds,
 } from './types.js';
 
 /**
@@ -264,6 +280,7 @@ export class Kraty {
   readonly catalog: CatalogClient;
   readonly dailyLogin: DailyLoginClient;
   readonly guilds: GuildsClient;
+  readonly offers: OffersClient;
   readonly chat: ChatClient;
   readonly moderation: ModerationClient;
 
@@ -282,6 +299,7 @@ export class Kraty {
     this.catalog = new CatalogClient(this.client);
     this.dailyLogin = new DailyLoginClient(this.client);
     this.guilds = new GuildsClient(this.client);
+    this.offers = new OffersClient(this.client);
     this.chat = new ChatClient(this.client);
     this.moderation = new ModerationClient(this.client);
   }
@@ -296,12 +314,14 @@ export class Kraty {
    *
    * ```ts
    * await kraty.trackPurchase({
-   *   transactionId: storeTx.id,
+   *   // StoreKit 2 `transactionId` (Google Play: `orderId`); see `canonicalTransactionId`.
+   *   transactionId: storeTx.transactionId,
    *   store: 'app_store',
    *   productId: 'gems_500',
    *   amountMinor: 499,   // $4.99 — minor units, as charged
    *   currency: 'USD',
    *   receipt: storeTx.receipt,
+   *   offerInstanceId: offer?.instanceId, // when bought from `kraty.offers.list()`
    * });
    * ```
    *
