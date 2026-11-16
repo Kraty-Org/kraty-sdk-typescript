@@ -1,3 +1,5 @@
+import type { ChatMessage } from './types.js';
+
 /**
  * Sealed-ish set of error codes the backend returns on the
  * `/sdk/v1` surface. Mirrors `apps/backend/src/api/errors.ts`.
@@ -59,7 +61,14 @@ export type KratyErrorCode =
   | 'player_blocked'
   | 'friend_code_invalid'
   // ── inventory ──────────────────────────────────────────────────
-  | 'inventory_not_permissive';
+  | 'inventory_not_permissive'
+  // ── chat anti-spam ─────────────────────────────────────────────
+  | 'chat_slow_mode'
+  | 'chat_duplicate_message'
+  | 'chat_rate_limited'
+  | 'chat_muted'
+  // ── elastic scaling ────────────────────────────────────────────
+  | 'service_unavailable';
 
 export interface KratyErrorPayload {
   code: KratyErrorCode | string;
@@ -79,14 +88,19 @@ export interface KratyErrorPayload {
  * a code the SDK hasn't bumped to yet, use the generic `err.is(code)`.
  */
 export class KratyApiError extends Error {
+  /** The response's `Retry-After` header in seconds, when it sent one. */
+  public readonly retryAfterHeaderSeconds: number | null;
+
   constructor(
     public readonly status: number,
     public readonly code: KratyErrorCode | string,
     message: string,
     public readonly details?: unknown,
+    retryAfterHeaderSeconds?: number | null,
   ) {
     super(`[${status}] ${code}: ${message}`);
     this.name = 'KratyApiError';
+    this.retryAfterHeaderSeconds = retryAfterHeaderSeconds ?? null;
   }
 
   /**
@@ -241,6 +255,55 @@ export class KratyApiError extends Error {
    * and retry `events.start` once it transitions out of `forming`.
    */
   get isLobbyForming(): boolean { return this.code === 'lobby_forming'; }
+
+  // ── chat anti-spam ───────────────────────────────────────────────
+  // Chat sends and edits are never auto-retried on 429: a retried refusal is
+  // another spam strike, and enough strikes mute the player automatically.
+
+  /** 429: sent again before the conversation's cooldown passed. `details.cooldownSeconds` is the cooldown. */
+  get isChatSlowMode(): boolean { return this.code === 'chat_slow_mode'; }
+
+  /** 429: the same text again in this conversation within the duplicate window. */
+  get isChatDuplicateMessage(): boolean { return this.code === 'chat_duplicate_message'; }
+
+  /** 429: over the game's messages-per-minute. `details.limitPerMinute` is the limit. */
+  get isChatRateLimited(): boolean { return this.code === 'chat_rate_limited'; }
+
+  /**
+   * 403: the player is muted (`details.until`). Repeated spam refusals mute
+   * automatically; a `restriction` event arrives on the chat stream too.
+   */
+  get isChatMuted(): boolean { return this.code === 'chat_muted'; }
+
+  // ── elastic scaling ──────────────────────────────────────────────
+
+  /**
+   * 503: the server is busy (scaling up, or shedding load) and refused the
+   * request before doing anything. Always safe to retry after
+   * `retryAfterSeconds`. Chat sends and the SDK's live streams already do
+   * that on their own, so a game rarely sees this.
+   */
+  get isServiceUnavailable(): boolean { return this.code === 'service_unavailable'; }
+
+  /**
+   * Seconds to wait before trying again (`details.retryAfterSeconds` on the
+   * chat 429s and the busy 503, else the `Retry-After` header), or null
+   * when the error doesn't carry one. Don't resend sooner.
+   */
+  get retryAfterSeconds(): number | null {
+    const d = this.details;
+    if (d && typeof d === 'object' && typeof (d as { retryAfterSeconds?: unknown }).retryAfterSeconds === 'number') {
+      return (d as { retryAfterSeconds: number }).retryAfterSeconds;
+    }
+    return this.retryAfterHeaderSeconds;
+  }
+}
+
+/** Parse a `Retry-After` header given in seconds (the HTTP-date form is ignored). */
+export function parseRetryAfter(value: string | null | undefined): number | null {
+  if (!value) return null;
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 0 ? n : null;
 }
 
 /**
@@ -255,6 +318,38 @@ export class KratyNetworkError extends Error {
     super(message);
     this.name = 'KratyNetworkError';
     if (originalCause !== undefined) this.originalCause = originalCause;
+  }
+}
+
+/**
+ * A chat message (or edit) the SDK could not deliver within the client's
+ * `chat.outboxTimeoutMs` (default 120 s): the network was down or the
+ * servers stayed busy the whole time. Never a refusal (those throw
+ * `KratyApiError`), so nothing was posted and no spam strike was counted.
+ *
+ * Show the message as "not sent, tap to retry" and call `err.retry()` on the
+ * tap: it goes back through the outbox with the SAME `clientMessageId`, so
+ * even if an earlier try did reach the server it is never posted twice.
+ * Extends `KratyNetworkError`, so existing network-error handling still
+ * catches it.
+ */
+export class KratyChatNotSentError extends KratyNetworkError {
+  constructor(
+    message: string,
+    public readonly conversationId: string,
+    /** The id the message was sent with; null for an edit. */
+    public readonly clientMessageId: string | null,
+    /** The last failure seen (a `KratyNetworkError`, or a 5xx `KratyApiError`). */
+    public readonly lastError: unknown,
+    private readonly resend: () => Promise<ChatMessage>,
+  ) {
+    super(message, lastError);
+    this.name = 'KratyChatNotSentError';
+  }
+
+  /** Send it again through the outbox (same `clientMessageId`); resolves with the message. */
+  retry(): Promise<ChatMessage> {
+    return this.resend();
   }
 }
 

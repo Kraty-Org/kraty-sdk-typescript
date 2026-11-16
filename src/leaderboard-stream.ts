@@ -17,6 +17,9 @@ import { openSseStream, type SseEvent, type SseStream } from './sse.js';
  *   Render final placements and stop expecting `score_update`s.
  * - `closed`: server is finalizing or closing. After this the
  *   stream completes.
+ * - `connection` (`subscribe()` only): `data.state` is `reconnecting` or
+ *   `connected`; the subscription reconnects on its own after a server
+ *   `close`, a drop or 40 s of silence. A status, not an error.
  *
  * `data` is the parsed `data:` JSON line.
  */
@@ -59,9 +62,9 @@ export interface LeaderboardFinalizedData {
  * Handle to an active SSE subscription. Iterate `events` to consume
  * server-pushed updates, call `close()` to stop.
  *
- * The SDK does NOT auto-reconnect on transport drop; surface errors
- * from the iterable and re-call `leaderboards.live(...)` after a
- * backoff if you want resumption.
+ * One connection: `live()` does NOT auto-reconnect on transport drop;
+ * the iterable throws and you re-call `live(...)` after a backoff. The
+ * high-level `subscribe(...)` reconnects on its own.
  */
 export type LeaderboardStream = SseStream;
 
@@ -72,6 +75,8 @@ interface OpenArgs {
   authHeader: string;
   playerSecret: string | null;
   sdkUserAgent: string;
+  /** Called whenever bytes arrive (heartbeats included). */
+  onActivity?: () => void;
 }
 
 /**
@@ -87,5 +92,6 @@ export async function openLeaderboardStream(args: OpenArgs): Promise<Leaderboard
     playerSecret: args.playerSecret,
     sdkUserAgent: args.sdkUserAgent,
     label: 'leaderboard stream',
+    ...(args.onActivity ? { onActivity: args.onActivity } : {}),
   });
 }

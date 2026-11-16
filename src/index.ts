@@ -62,7 +62,8 @@ export {
 } from './leaderboard-stream.js';
 export { openChatStream } from './chat-stream.js';
 export type { ChatStream, ChatStreamEvent } from './chat-stream.js';
-export type { ChatSendOptions } from './resources.js';
+export type { ChatSendOptions, ChatSendPromise } from './resources.js';
+export type { StreamConnectionEvent, ReconnectOptions } from './reconnect.js';
 export type {
   LeaderboardStream,
   LeaderboardStreamEvent,
@@ -102,6 +103,7 @@ export type {
 } from './finalization.js';
 export {
   KratyApiError,
+  KratyChatNotSentError,
   KratyNetworkError,
   isLobbyForming,
 } from './errors.js';

@@ -1,13 +1,14 @@
-import { KratyApiError, KratyNetworkError, type KratyErrorPayload } from './errors.js';
+import { KratyApiError, KratyNetworkError, parseRetryAfter, type KratyErrorPayload } from './errors.js';
 
 /**
  * Minimal Server-Sent Events reader shared by every Kraty stream
  * (leaderboards, inventory). Parses the `event:` / `data:` line protocol
  * off a `fetch` response body and yields one object per event.
  *
- * No auto-reconnect on purpose: resumption policy differs per stream and
- * per game (backoff, whether to re-read state first), so the SDK surfaces
- * the transport error and lets the caller decide.
+ * One connection, no reconnect: the iterable throws on a drop. The
+ * self-healing streams the resource clients return (`chat.live()`,
+ * `inventory.live()`, `eventLeaderboards.subscribe()`) wrap this with
+ * reconnect, backoff and a heartbeat watchdog (see `reconnect.ts`).
  */
 
 /** One parsed SSE event: the `event:` name plus the decoded `data:` JSON. */
@@ -32,6 +33,8 @@ export interface OpenSseArgs {
   sdkUserAgent: string;
   /** Prefix for transport error messages, e.g. `"leaderboard stream"`. */
   label: string;
+  /** Called whenever bytes arrive, heartbeat comments included (feeds a watchdog). */
+  onActivity?: () => void;
 }
 
 export async function openSseStream(args: OpenSseArgs): Promise<SseStream> {
@@ -69,6 +72,7 @@ export async function openSseStream(args: OpenSseArgs): Promise<SseStream> {
       payload?.error?.code ?? `http_${response.status}`,
       payload?.error?.message ?? text,
       payload?.error?.details,
+      parseRetryAfter(response.headers.get('retry-after')),
     );
   }
 
@@ -145,6 +149,7 @@ export async function openSseStream(args: OpenSseArgs): Promise<SseStream> {
       while (true) {
         if (closed) return;
         const { value, done } = await reader.read();
+        args.onActivity?.();
         if (done) {
           // Server closed the stream; flush any final event.
           const tail = flushEvent();

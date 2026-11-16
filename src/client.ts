@@ -1,4 +1,4 @@
-import { KratyApiError, KratyNetworkError, type KratyErrorPayload } from './errors.js';
+import { KratyApiError, KratyNetworkError, parseRetryAfter, type KratyErrorPayload } from './errors.js';
 import {
   InMemorySecretStore,
   LocalStorageSecretStore,
@@ -123,8 +123,14 @@ export interface KratyClientOptions {
    * request (and `?filter=` on the chat stream). Leave it unset to follow the
    * player's saved preference (`chat.setPreferences`), then each conversation
    * kind's default. Kinds the game set to `always` filter regardless.
+   *
+   * `outboxTimeoutMs` (default 120 000) is how long a chat send or edit keeps
+   * retrying through network drops and busy servers before it fails with
+   * `KratyChatNotSentError`. `waitForCooldown` (default false) makes a send
+   * made during the conversation's cooldown wait in the outbox until the
+   * cooldown ends, instead of failing at once with a local `chat_slow_mode`.
    */
-  chat?: { profanityFilter?: boolean };
+  chat?: { profanityFilter?: boolean; outboxTimeoutMs?: number; waitForCooldown?: boolean };
 }
 
 export interface RetryConfig {
@@ -241,6 +247,9 @@ export class KratyClient {
   private readonly _appVersion: string | null;
   // Chat profanity-filter choice (KratyClientOptions.chat), 'on' | 'off' | null.
   private _chatFilter: 'on' | 'off' | null;
+  // Chat outbox settings (KratyClientOptions.chat).
+  private readonly _chatOutboxTimeoutMs: number;
+  private readonly _chatWaitForCooldown: boolean;
   // Inflight register dedupe: concurrent first-touch calls on a
   // freshly-constructed client share the same registration so we
   // don't fire two POST /register against the server.
@@ -276,6 +285,8 @@ export class KratyClient {
     this._appVersion = opts.appVersion?.trim() || null;
     this._chatFilter =
       opts.chat?.profanityFilter === undefined ? null : opts.chat.profanityFilter ? 'on' : 'off';
+    this._chatOutboxTimeoutMs = Math.max(0, opts.chat?.outboxTimeoutMs ?? 120_000);
+    this._chatWaitForCooldown = opts.chat?.waitForCooldown ?? false;
     this._finalization = new FinalizationTracker({
       store: opts.membershipStore ?? defaultMembershipStore(),
       // Never force-register during catch-up: only the current active player.
@@ -443,6 +454,10 @@ export class KratyClient {
   get sdkUserAgent(): string { return SDK_USER_AGENT; }
   /** The chat profanity-filter choice (`on` / `off`), or null when unset. */
   get chatFilter(): 'on' | 'off' | null { return this._chatFilter; }
+  /** @internal How long a chat send / edit keeps retrying before `KratyChatNotSentError`. */
+  get chatOutboxTimeoutMs(): number { return this._chatOutboxTimeoutMs; }
+  /** @internal Whether a send during a cooldown waits for it by default. */
+  get chatWaitForCooldown(): boolean { return this._chatWaitForCooldown; }
   /** Change the player's chat filter choice at runtime (a settings toggle); null = unset. */
   setChatFilter(on: boolean | null): void {
     this._chatFilter = on === null ? null : on ? 'on' : 'off';
@@ -553,15 +568,30 @@ export class KratyClient {
     method: string,
     path: string,
     body?: unknown,
-    init?: { idempotencyKey?: string },
+    init?: {
+      idempotencyKey?: string;
+      /**
+       * `false` surfaces a 429 at once instead of backing off and retrying.
+       * Chat sends and edits use it: a retried refusal counts as another
+       * spam strike and can get the player muted automatically.
+       */
+      retryOn429?: boolean;
+      /**
+       * Total HTTP calls for this request, overriding the client's
+       * `retry.attempts` (1 = no retry). The chat outbox passes 1 and runs
+       * its own, longer retry loop.
+       */
+      attempts?: number;
+    },
   ): Promise<T> {
     const url = `${this._baseUrl}${path.startsWith('/') ? path : `/${path}`}`;
     const upperMethod = method.toUpperCase();
     const idempotencyKey = this.resolveIdempotencyKey(upperMethod, body, init?.idempotencyKey);
     const requestBody = this.attachIdempotencyKey(body, idempotencyKey);
 
+    const maxAttempts = Math.max(1, init?.attempts ?? this.retry.attempts);
     let lastErr: unknown;
-    for (let attempt = 1; attempt <= this.retry.attempts; attempt++) {
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       const start = Date.now();
       try {
         const res = await this.fireOnce(upperMethod, url, requestBody);
@@ -595,7 +625,9 @@ export class KratyClient {
           return body as T;
         }
         const apiErr = await asApiError(res);
-        if (RETRYABLE_STATUSES.has(res.status) && attempt < this.retry.attempts) {
+        const retryable =
+          RETRYABLE_STATUSES.has(res.status) && !(res.status === 429 && init?.retryOn429 === false);
+        if (retryable && attempt < maxAttempts) {
           await this.sleepBackoff(attempt, res);
           lastErr = apiErr;
           continue;
@@ -619,7 +651,7 @@ export class KratyClient {
           durationMs: Date.now() - start,
           ok: false,
         });
-        if (attempt < this.retry.attempts) {
+        if (attempt < maxAttempts) {
           await this.sleepBackoff(attempt);
           lastErr = wrapped;
           continue;
@@ -807,12 +839,15 @@ async function asApiError(res: Response): Promise<KratyApiError> {
     /* swallow, fall through to a synthesized error */
   }
   const err = payload?.error;
+  const retryAfter = parseRetryAfter(res.headers.get('retry-after'));
   if (err) {
-    return new KratyApiError(res.status, err.code, err.message, err.details);
+    return new KratyApiError(res.status, err.code, err.message, err.details, retryAfter);
   }
   return new KratyApiError(
     res.status,
     'internal_error',
     `non-2xx response without an error envelope (status=${res.status})`,
+    undefined,
+    retryAfter,
   );
 }

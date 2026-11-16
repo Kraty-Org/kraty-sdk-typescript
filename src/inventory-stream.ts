@@ -1,4 +1,5 @@
-import { openSseStream, type SseStream } from './sse.js';
+import type { StreamConnectionEvent } from './reconnect.js';
+import { openSseStream, type SseEvent, type SseStream } from './sse.js';
 
 /**
  * Live feed of everything that touches a player's items, wallet, and
@@ -10,7 +11,10 @@ import { openSseStream, type SseStream } from './sse.js';
  * stale numbers until the next launch.
  *
  * Consume it as an async iterable (`for await`) or hand it to
- * {@link InventoryClient.watch} for a plain callback.
+ * {@link InventoryClient.watch} for a plain callback. Both heal themselves
+ * (reconnect after a server `close`, a drop or 40 s of silence) and report
+ * it with `connection` events; `openInventoryStream` is the single
+ * connection.
  */
 
 /** Who caused a change; lets a client ignore the echo of its own writes. */
@@ -68,7 +72,9 @@ export type InventoryStreamEvent =
   | InventoryReadyEvent
   | InventoryChangedEvent
   | WalletChangedEvent
-  | GrantCreatedEvent;
+  | GrantCreatedEvent
+  /** Self-healing stream only: `reconnecting` / `connected`. Refresh your reads on `connected`. */
+  | StreamConnectionEvent;
 
 /** Handle to an open inventory subscription. `close()` is idempotent. */
 export interface InventoryStream {
@@ -83,27 +89,37 @@ interface OpenArgs {
   authHeader: string;
   playerSecret: string | null;
   sdkUserAgent: string;
+  /** Called whenever bytes arrive (heartbeats included). */
+  onActivity?: () => void;
 }
 
-export async function openInventoryStream(args: OpenArgs): Promise<InventoryStream> {
-  const raw: SseStream = await openSseStream({
+/** @internal One raw inventory SSE connection. */
+export function openInventorySse(args: OpenArgs): Promise<SseStream> {
+  return openSseStream({
     fetchImpl: args.fetchImpl,
     url: `${args.baseUrl}/sdk/v1/players/${encodeURIComponent(args.externalPlayerId)}/inventory/stream`,
     authHeader: args.authHeader,
     playerSecret: args.playerSecret,
     sdkUserAgent: args.sdkUserAgent,
     label: 'inventory stream',
+    ...(args.onActivity ? { onActivity: args.onActivity } : {}),
   });
+}
 
-  // The wire events already carry their own `kind`, so narrowing is just a
-  // matter of trusting the discriminator the server sent. Unknown kinds
-  // (a newer backend) are passed through rather than dropped, so a client
-  // built against an older SDK still sees them if it wants to.
+/**
+ * @internal The wire events already carry their own `kind`, so narrowing is
+ * just a matter of trusting the discriminator the server sent. Unknown kinds
+ * (a newer backend) are passed through rather than dropped.
+ */
+export function mapInventoryEvent(ev: SseEvent): InventoryStreamEvent {
+  return { ...(ev.data as Record<string, unknown>), kind: ev.kind } as InventoryStreamEvent;
+}
+
+/** One inventory stream connection, no reconnect (prefer `kraty.inventory.live()`). */
+export async function openInventoryStream(args: OpenArgs): Promise<InventoryStream> {
+  const raw: SseStream = await openInventorySse(args);
   async function* iterate(): AsyncGenerator<InventoryStreamEvent, void, unknown> {
-    for await (const ev of raw.events) {
-      yield { ...(ev.data as Record<string, unknown>), kind: ev.kind } as InventoryStreamEvent;
-    }
+    for await (const ev of raw.events) yield mapInventoryEvent(ev);
   }
-
   return { events: iterate(), close: () => raw.close() };
 }

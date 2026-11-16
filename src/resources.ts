@@ -1,6 +1,7 @@
 import { KratyClient, defaultIdempotencyKey } from './client.js';
-import { openChatStream, type ChatStream, type ChatStreamEvent } from './chat-stream.js';
-import { KratyApiError } from './errors.js';
+import { mapChatEvent, openChatSse, openChatStream, type ChatStream, type ChatStreamEvent } from './chat-stream.js';
+import { KratyApiError, KratyChatNotSentError, KratyNetworkError } from './errors.js';
+import { isFatalStreamError, openReconnectingStream, type ReconnectOptions } from './reconnect.js';
 import { MembershipKind } from './finalization.js';
 import {
   openLeaderboardStream,
@@ -8,6 +9,8 @@ import {
   type LeaderboardStreamEvent,
 } from './leaderboard-stream.js';
 import {
+  mapInventoryEvent,
+  openInventorySse,
   openInventoryStream,
   type InventoryStream,
   type InventoryStreamEvent,
@@ -666,7 +669,14 @@ export class EventLeaderboardsClient {
    * @param onEvent        Fired for every `LeaderboardStreamEvent`.
    * @param opts.pollIntervalMs  Background read cadence. Default 15_000.
    *                              Set to 0 to disable polling (SSE-only).
-   * @param opts.onError   Optional; receives transport / parse errors.
+   * @param opts.onError   Optional; receives poll errors and real stream
+   *                       refusals. Drops are not errors: the SSE side
+   *                       reconnects on its own (server `close`, drop, busy
+   *                       503, 40 s of silence) and reports it with
+   *                       `connection` events (`data.state`), and stops for
+   *                       good after `closed`.
+   * @param opts.heartbeatTimeoutMs  Silence that counts as a dead stream.
+   *                       Default 40_000.
    */
   subscribe(
     leaderboardId: string,
@@ -674,6 +684,7 @@ export class EventLeaderboardsClient {
     opts: {
       pollIntervalMs?: number;
       onError?: (err: unknown) => void;
+      heartbeatTimeoutMs?: number;
     } = {},
   ): { close: () => Promise<void> } {
     const pollIntervalMs = opts.pollIntervalMs ?? 15_000;
@@ -685,7 +696,7 @@ export class EventLeaderboardsClient {
     // which matches what game UIs want (no re-render churn).
     const lastSurfacedScore = new Map<string, number>();
     let closed = false;
-    let streamHandle: LeaderboardStream | null = null;
+    let streamHandle: { close(): Promise<void> } | null = null;
     let pollTimer: ReturnType<typeof setTimeout> | null = null;
 
     const surface = (event: LeaderboardStreamEvent): void => {
@@ -717,9 +728,23 @@ export class EventLeaderboardsClient {
     };
 
     const consumeSse = async (): Promise<void> => {
-      let handle: LeaderboardStream;
+      let handle: Awaited<ReturnType<typeof openReconnectingStream<LeaderboardStreamEvent>>>;
       try {
-        handle = await this.live(leaderboardId);
+        handle = await openReconnectingStream<LeaderboardStreamEvent>({
+          open: (onActivity) =>
+            openLeaderboardStream({
+              fetchImpl: this.client.fetchForStreaming,
+              baseUrl: this.client.baseUrl,
+              leaderboardId,
+              authHeader: this.client.authHeader,
+              playerSecret: this.client.playerSecret,
+              sdkUserAgent: this.client.sdkUserAgent,
+              onActivity,
+            }),
+          map: (ev) => ev,
+          isTerminal: (ev) => ev.kind === 'closed',
+          ...(opts.heartbeatTimeoutMs !== undefined ? { heartbeatTimeoutMs: opts.heartbeatTimeoutMs } : {}),
+        });
       } catch (err) {
         if (!closed) {
           try { onError(err); } catch { /* swallow */ }
@@ -737,8 +762,14 @@ export class EventLeaderboardsClient {
       }
       streamHandle = handle;
       try {
-        for await (const ev of streamHandle.events) {
-          surface(ev);
+        for await (const ev of handle.events) {
+          if ('state' in ev) {
+            // Status from the reconnect loop, shaped like any stream event.
+            const { kind: _kind, ...data } = ev;
+            surface({ kind: 'connection', data: { ...data } });
+          } else {
+            surface(ev);
+          }
         }
       } catch (err) {
         if (!closed) {
@@ -1049,18 +1080,30 @@ export class InventoryClient {
    * }
    * ```
    *
-   * Does NOT auto-reconnect: re-call after a backoff if the iterable throws.
+   * Self-healing: reconnects on its own after a server `close`, a drop, a
+   * busy 503 or 40 s of silence, and reports it with `connection` events
+   * (`reconnecting` / `connected`). Changes made while it was reconnecting
+   * aren't replayed, so refresh your reads on `connected`. Only real refusals
+   * end the iterable with a throw. `autoReconnect: false` returns the single
+   * connection (throws on any drop; reconnect yourself).
    * Treat every event as "refresh this"; the REST reads stay authoritative.
    */
-  async live(opts: { as?: string } = {}): Promise<InventoryStream> {
+  async live(opts: { as?: string } & ReconnectOptions = {}): Promise<InventoryStream> {
     const externalPlayerId = await resolvePlayerId(this.client, opts.as, 'inventory.live');
-    return openInventoryStream({
+    const args = (onActivity?: () => void) => ({
       fetchImpl: this.client.fetchForStreaming,
       baseUrl: this.client.baseUrl,
       externalPlayerId,
       authHeader: this.client.authHeader,
       playerSecret: this.client.playerSecret,
       sdkUserAgent: this.client.sdkUserAgent,
+      ...(onActivity ? { onActivity } : {}),
+    });
+    if (opts.autoReconnect === false) return openInventoryStream(args());
+    return openReconnectingStream<InventoryStreamEvent>({
+      open: (onActivity) => openInventorySse(args(onActivity)),
+      map: mapInventoryEvent,
+      ...(opts.heartbeatTimeoutMs !== undefined ? { heartbeatTimeoutMs: opts.heartbeatTimeoutMs } : {}),
     });
   }
 
@@ -1071,6 +1114,7 @@ export class InventoryClient {
    * ```ts
    * const stop = await kraty.inventory.watch((ev) => {
    *   if (ev.kind === 'grant_created') showRewardPopup(ev.contents);
+   *   if (ev.kind === 'connection' && ev.state === 'connected') refreshBackpack();
    * });
    * // later
    * await stop();
@@ -1078,8 +1122,8 @@ export class InventoryClient {
    *
    * Pass `ignoreOwnWrites: true` to skip events the client itself caused
    * (`origin: 'client'`), so a consume doesn't bounce back as a refresh.
-   * `onError` receives transport failures; the subscription is finished by
-   * the time it fires, so reconnect from there if you want resumption.
+   * Reconnects on its own like `live()`; `onError` only receives real
+   * refusals (the subscription is over by then).
    * Returns a stop function; calling it more than once is safe.
    */
   async watch(
@@ -1088,23 +1132,28 @@ export class InventoryClient {
       ignoreOwnWrites?: boolean;
       onError?: (err: unknown) => void;
       as?: string;
-    } = {},
+    } & ReconnectOptions = {},
   ): Promise<() => Promise<void>> {
-    const stream = await this.live(opts.as ? { as: opts.as } : {});
+    const { ignoreOwnWrites, onError, ...liveOpts } = opts;
+    const stream = await this.live(liveOpts);
     void (async () => {
       try {
         for await (const ev of stream.events) {
           if (
-            opts.ignoreOwnWrites &&
+            ignoreOwnWrites &&
             'origin' in ev &&
             (ev as { origin?: string }).origin === 'client'
           ) {
             continue;
           }
-          handler(ev);
+          try {
+            handler(ev);
+          } catch (err) {
+            onError?.(err);
+          }
         }
       } catch (err) {
-        opts.onError?.(err);
+        onError?.(err);
       }
     })();
     return () => stream.close();
@@ -2212,12 +2261,55 @@ export type { KratyApiError };
 
 // ── Chat (docs: chat.mdx) ──────────────────────────────────────────────
 
+/** The server's default per-kind cooldowns, used until `chat.config()` has been read. */
+const DEFAULT_CHAT_KIND_COOLDOWNS: Record<string, number> = { direct: 1, group: 1, guild: 2, channel: 15 };
+
 /** Options shared by sends: reply threading and a retry-safe client id. */
 export interface ChatSendOptions {
   replyToId?: string;
   /** Retry-safe: the same id returns the same message. Generated when omitted. */
   clientMessageId?: string;
+  /**
+   * During the conversation's cooldown, wait in the outbox until it ends and
+   * then send, instead of failing at once with a local `chat_slow_mode`.
+   * Defaults to the client's `chat.waitForCooldown` (false).
+   */
+  waitForCooldown?: boolean;
   as?: string;
+}
+
+/**
+ * What `chat.send` / `chat.sendCustom` return: the usual promise of the
+ * posted message, carrying its `clientMessageId` right away so the game can
+ * render the message as pending and match it when it arrives (the message,
+ * on the stream too, echoes `clientMessageId` to its sender).
+ */
+export type ChatSendPromise = Promise<ChatMessage> & {
+  readonly clientMessageId: string;
+  readonly conversationId: string;
+};
+
+/** Outbox backoff between tries when the server gave no `Retry-After`. */
+const OUTBOX_BACKOFF_BASE_MS = 500;
+const OUTBOX_BACKOFF_MAX_MS = 10_000;
+
+/** A failure the outbox retries: no answer, or a server error (503 busy above all). Never a 4xx. */
+function isTransientWriteError(err: unknown): boolean {
+  if (err instanceof KratyChatNotSentError) return false;
+  if (err instanceof KratyNetworkError) return true;
+  return err instanceof KratyApiError && err.status >= 500;
+}
+
+function outboxDelayMs(err: unknown, attempt: number): number {
+  if (err instanceof KratyApiError && err.retryAfterSeconds !== null) {
+    return Math.min(err.retryAfterSeconds * 1000, OUTBOX_BACKOFF_MAX_MS);
+  }
+  const base = Math.min(OUTBOX_BACKOFF_BASE_MS * 2 ** (attempt - 1), OUTBOX_BACKOFF_MAX_MS);
+  return Math.round(base * (0.5 + Math.random() * 0.5));
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /**
@@ -2233,6 +2325,15 @@ export interface ChatSendOptions {
 export class ChatClient {
   constructor(private readonly client: KratyClient) {}
 
+  /** Conversation kind + channel cooldown, learned from every conversation view the SDK returns. */
+  private readonly known = new Map<string, { kind: string; channelCooldown: number | null }>();
+  /** Per-kind cooldowns from `config()`; the server defaults until it's loaded. */
+  private readonly kindCooldowns = new Map<string, number>(Object.entries(DEFAULT_CHAT_KIND_COOLDOWNS));
+  /** conversationId → epoch ms when the player may send there again. */
+  private readonly readyAt = new Map<string, number>();
+  /** conversationId → the tail of its outbox (sends go out one at a time, in order). */
+  private readonly outbox = new Map<string, Promise<void>>();
+
   private async base(as: string | undefined, op: string): Promise<string> {
     const externalPlayerId = await resolvePlayerId(this.client, as, op);
     return `/sdk/v1/players/${encodeURIComponent(externalPlayerId)}/chat`;
@@ -2244,17 +2345,103 @@ export class ChatClient {
 
   private async get<T>(as: string | undefined, op: string, path: string): Promise<T> {
     const base = await this.base(as, op);
-    return (await this.client.request<DataEnvelope<T>>('GET', `${base}${path}`)).data;
+    return this.observe((await this.client.request<DataEnvelope<T>>('GET', `${base}${path}`)).data);
   }
 
   private async send_<T>(as: string | undefined, op: string, method: string, path: string, body?: unknown): Promise<T> {
     const base = await this.base(as, op);
-    return (await this.client.request<DataEnvelope<T>>(method, `${base}${path}`, body)).data;
+    return this.observe((await this.client.request<DataEnvelope<T>>(method, `${base}${path}`, body)).data);
+  }
+
+  /**
+   * One try of a message write (send / edit): a 429 surfaces at once (never
+   * retried: a retried refusal is another spam strike). Only a
+   * `chat_slow_mode` refusal's `retryAfterSeconds` feeds
+   * {@link ChatClient.cooldownRemaining}: a `chat_duplicate_message` wait is
+   * for that text only and `chat_rate_limited` is per player, so neither
+   * holds the conversation. The outbox ({@link ChatClient.deliver}) owns the
+   * retries.
+   */
+  private async write_<T>(
+    as: string | undefined,
+    op: string,
+    method: string,
+    conversationId: string,
+    path: string,
+    body: unknown,
+  ): Promise<T> {
+    const base = await this.base(as, op);
+    try {
+      return (await this.client.request<DataEnvelope<T>>(method, `${base}${path}`, body, { retryOn429: false, attempts: 1 })).data;
+    } catch (err) {
+      const wait = err instanceof KratyApiError && err.isChatSlowMode ? err.retryAfterSeconds : null;
+      if (wait !== null) this.holdUntil(conversationId, Date.now() + wait * 1000);
+      throw err;
+    }
+  }
+
+  /** Remember the kind / channel cooldown of any conversation view in a response. */
+  private observe<T>(data: T): T {
+    const learn = (v: unknown): void => {
+      if (!v || typeof v !== 'object') return;
+      const c = v as Partial<ChatConversation>;
+      if (typeof c.conversationId !== 'string' || typeof c.kind !== 'string') return;
+      const cd = c.channel?.cooldownSeconds;
+      this.known.set(c.conversationId, { kind: c.kind, channelCooldown: typeof cd === 'number' ? cd : null });
+    };
+    learn(data);
+    if (data && typeof data === 'object') {
+      const page = data as { conversations?: unknown; channels?: unknown };
+      if (Array.isArray(page.conversations)) page.conversations.forEach(learn);
+      if (Array.isArray(page.channels)) page.channels.forEach(learn);
+    }
+    return data;
+  }
+
+  private holdUntil(conversationId: string, at: number): void {
+    if (at > (this.readyAt.get(conversationId) ?? 0)) this.readyAt.set(conversationId, at);
+  }
+
+  /** Milliseconds left on the conversation's cooldown (0 when free). */
+  private cooldownMs(conversationId: string): number {
+    const at = this.readyAt.get(conversationId);
+    return at === undefined ? 0 : Math.max(0, at - Date.now());
+  }
+
+  /** The conversation's cooldown in seconds: the channel's, else its kind's (0 when the SDK hasn't seen it yet). */
+  private cooldownOf(conversationId: string): number {
+    const k = this.known.get(conversationId);
+    if (!k) return 0;
+    return k.channelCooldown ?? this.kindCooldowns.get(k.kind) ?? 0;
+  }
+
+  /**
+   * Seconds until the player may send in this conversation again (0 when
+   * free): from the conversation's cooldown after a successful send, and
+   * from a `chat_slow_mode` 429's `retryAfterSeconds` (duplicate and
+   * rate-limit refusals don't hold the conversation). Use it to grey out the
+   * send button.
+   * Knows a conversation's cooldown once the SDK has returned its view
+   * (`conversations`, `conversation`, `channel`, …) and `config()`.
+   */
+  cooldownRemaining(conversationId: string): number {
+    const at = this.readyAt.get(conversationId);
+    if (at === undefined) return 0;
+    const left = at - Date.now();
+    if (left <= 0) {
+      this.readyAt.delete(conversationId);
+      return 0;
+    }
+    return Math.ceil(left / 1000);
   }
 
   /** GET `/chat/config`: kinds, channels, limits, custom card types, preferences and standing. */
   async config(opts: { as?: string } = {}): Promise<ChatClientConfig> {
-    return this.get(opts.as, 'chat.config', '/config');
+    const config = await this.get<ChatClientConfig>(opts.as, 'chat.config', '/config');
+    for (const [kind, k] of Object.entries(config.kinds ?? {})) {
+      if (typeof k?.cooldownSeconds === 'number') this.kindCooldowns.set(kind, k.cooldownSeconds);
+    }
+    return config;
   }
 
   /** GET `/chat/preferences`. */
@@ -2392,44 +2579,169 @@ export class ChatClient {
     return this.get(opts.as, 'chat.messages', `${this.conv(conversationId)}/messages${qs ? `?${qs}` : ''}`);
   }
 
-  /** POST `/chat/conversations/:id/messages`: send text. */
-  async send(conversationId: string, text: string, opts: ChatSendOptions = {}): Promise<ChatMessage> {
-    return this.send_(opts.as, 'chat.send', 'POST', `${this.conv(conversationId)}/messages`, {
+  /**
+   * POST `/chat/conversations/:id/messages`: send text, through the outbox.
+   *
+   * Returns at once with `clientMessageId` (render the message as pending);
+   * the promise settles when it's posted. Sends to one conversation go out
+   * one at a time, in order. Network drops, timeouts and busy servers (5xx,
+   * `503` + `Retry-After`) are retried with the SAME `clientMessageId`, so
+   * the message is never posted twice, for up to the client's
+   * `chat.outboxTimeoutMs` (120 s); after that it fails with
+   * `KratyChatNotSentError` ("not sent, tap to retry": `err.retry()`). The
+   * outbox lives in memory: pending messages don't survive an app restart.
+   *
+   * Refusals throw at once, never retried: 429 `chat_slow_mode`,
+   * `chat_duplicate_message` or `chat_rate_limited` with
+   * `err.retryAfterSeconds`; repeated refusals mute the player (403
+   * `chat_muted`). A send while {@link ChatClient.cooldownRemaining} is
+   * above 0 fails locally with `chat_slow_mode` (no request, no strike),
+   * or with `waitForCooldown` waits for the cooldown and then sends.
+   */
+  send(conversationId: string, text: string, opts: ChatSendOptions = {}): ChatSendPromise {
+    const clientMessageId = opts.clientMessageId ?? defaultIdempotencyKey();
+    return this.enqueue(opts, 'chat.send', conversationId, clientMessageId, {
       type: 'text',
       text,
       ...(opts.replyToId ? { replyToId: opts.replyToId } : {}),
-      clientMessageId: opts.clientMessageId ?? defaultIdempotencyKey(),
+      clientMessageId,
     });
   }
 
-  /** POST `/chat/conversations/:id/messages`: send a game-defined card (`customType` from the config). */
-  async sendCustom(
+  /** POST `/chat/conversations/:id/messages`: send a game-defined card (`customType` from the config). Same outbox and anti-spam rules as `send`. */
+  sendCustom(
     conversationId: string,
     customType: string,
     payload: unknown,
     opts: ChatSendOptions & { text?: string } = {},
-  ): Promise<ChatMessage> {
-    return this.send_(opts.as, 'chat.sendCustom', 'POST', `${this.conv(conversationId)}/messages`, {
+  ): ChatSendPromise {
+    const clientMessageId = opts.clientMessageId ?? defaultIdempotencyKey();
+    return this.enqueue(opts, 'chat.sendCustom', conversationId, clientMessageId, {
       type: 'custom',
       customType,
       payload,
       ...(opts.text !== undefined ? { text: opts.text } : {}),
       ...(opts.replyToId ? { replyToId: opts.replyToId } : {}),
-      clientMessageId: opts.clientMessageId ?? defaultIdempotencyKey(),
+      clientMessageId,
     });
+  }
+
+  /** Queue a send behind the conversation's earlier ones. */
+  private enqueue(
+    opts: ChatSendOptions,
+    op: string,
+    conversationId: string,
+    clientMessageId: string,
+    body: Record<string, unknown>,
+  ): ChatSendPromise {
+    const queuedAt = Date.now();
+    const prev = this.outbox.get(conversationId) ?? Promise.resolve();
+    const job = prev.then(() => this.sendNow(opts, op, conversationId, clientMessageId, body, queuedAt));
+    const tail = job.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.outbox.set(conversationId, tail);
+    void tail.then(() => {
+      if (this.outbox.get(conversationId) === tail) this.outbox.delete(conversationId);
+    });
+    return Object.assign(job, { clientMessageId, conversationId });
+  }
+
+  /** The head of the queue: check the cooldown, then deliver. */
+  private async sendNow(
+    opts: ChatSendOptions,
+    op: string,
+    conversationId: string,
+    clientMessageId: string,
+    body: Record<string, unknown>,
+    queuedAt: number,
+  ): Promise<ChatMessage> {
+    let deadline = queuedAt + this.client.chatOutboxTimeoutMs;
+    if (this.cooldownMs(conversationId) > 0) {
+      if (!(opts.waitForCooldown ?? this.client.chatWaitForCooldown)) {
+        const left = this.cooldownRemaining(conversationId);
+        throw new KratyApiError(
+          429,
+          'chat_slow_mode',
+          `wait ${left}s before sending here again (refused by the SDK, nothing was sent)`,
+          { retryAfterSeconds: left, cooldownSeconds: this.cooldownOf(conversationId), local: true },
+        );
+      }
+      // Waiting for the cooldown isn't time spent failing to deliver.
+      const waitStart = Date.now();
+      for (let ms = this.cooldownMs(conversationId); ms > 0; ms = this.cooldownMs(conversationId)) await delay(ms);
+      deadline += Date.now() - waitStart;
+    }
+    const resend = (): Promise<ChatMessage> => this.enqueue(opts, op, conversationId, clientMessageId, body);
+    const message = await this.deliver<ChatMessage>(
+      opts.as,
+      op,
+      'POST',
+      conversationId,
+      `${this.conv(conversationId)}/messages`,
+      body,
+      deadline,
+      clientMessageId,
+      resend,
+    );
+    this.holdUntil(conversationId, Date.now() + this.cooldownOf(conversationId) * 1000);
+    return message;
+  }
+
+  /**
+   * Try a message write until it lands, a refusal comes back, or `deadline`
+   * would pass: then `KratyChatNotSentError`. Every try sends the same body.
+   */
+  private async deliver<T>(
+    as: string | undefined,
+    op: string,
+    method: string,
+    conversationId: string,
+    path: string,
+    body: unknown,
+    deadline: number,
+    clientMessageId: string | null,
+    resend: () => Promise<ChatMessage>,
+  ): Promise<T> {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await this.write_<T>(as, op, method, conversationId, path, body);
+      } catch (err) {
+        if (!isTransientWriteError(err)) throw err;
+        const wait = outboxDelayMs(err, attempt);
+        if (Date.now() + wait > deadline) {
+          throw new KratyChatNotSentError(
+            `chat ${op === 'chat.editMessage' ? 'edit' : 'message'} not sent: the server stayed unreachable or busy (${err instanceof Error ? err.message : String(err)})`,
+            conversationId,
+            clientMessageId,
+            err,
+            resend,
+          );
+        }
+        await delay(wait);
+      }
+    }
   }
 
   /**
    * PATCH `/chat/conversations/:id/messages/:messageId`: edit your own
    * message within the game's edit window (`config().messages.editWindowSeconds`).
+   * Edits count toward the per-minute rate; a 429 throws at once like `send`.
+   * Network drops and busy servers are retried like a send (no queue), up to
+   * `chat.outboxTimeoutMs`, then `KratyChatNotSentError`.
    */
   async editMessage(conversationId: string, messageId: string, text: string, opts: { as?: string } = {}): Promise<ChatMessage> {
-    return this.send_(
+    return this.deliver<ChatMessage>(
       opts.as,
       'chat.editMessage',
       'PATCH',
+      conversationId,
       `${this.conv(conversationId)}/messages/${encodeURIComponent(messageId)}`,
       { text },
+      Date.now() + this.client.chatOutboxTimeoutMs,
+      null,
+      () => this.editMessage(conversationId, messageId, text, opts),
     );
   }
 
@@ -2452,8 +2764,13 @@ export class ChatClient {
     return this.send_(opts.as, 'chat.markRead', 'POST', `${this.conv(conversationId)}/read`, { seq });
   }
 
-  /** POST `/chat/conversations/:id/typing`: "is typing…" (throttled server-side, never stored). */
+  /**
+   * POST `/chat/conversations/:id/typing`: "is typing…" (throttled
+   * server-side, never stored). Public channels have no typing indicators:
+   * for a conversation the SDK knows is a channel, nothing is sent.
+   */
   async typing(conversationId: string, opts: { as?: string } = {}): Promise<void> {
+    if (this.known.get(conversationId)?.kind === 'channel') return;
     await this.send_(opts.as, 'chat.typing', 'POST', `${this.conv(conversationId)}/typing`, {});
   }
 
@@ -2468,12 +2785,25 @@ export class ChatClient {
 
   /**
    * GET `/chat/stream`: every inbox conversation live, plus the named public
-   * channels (at most 10). Does NOT auto-reconnect: re-open after a backoff
-   * and catch up with `messages(id, { after })`.
+   * channels (at most 10).
+   *
+   * Self-healing: when the server closes the stream (scale-in, rebalancing,
+   * `slow_consumer`), it drops, a busy server refuses it (503), or it goes
+   * silent for `heartbeatTimeoutMs` (40 s; the server pings every 15 s), the
+   * SDK reconnects on its own, catches every followed conversation up from
+   * the last `seq` it knows (`messages(id, { after })`; quiet conversations
+   * from the `ready` event's `lastSeqs`, conversations added meanwhile from
+   * the start), and delivers the missed messages as normal `message` events
+   * before live ones, never twice.
+   * `connection` events report `reconnecting` / `connected` for a subtle
+   * indicator; they are not errors. `ready` arrives after every (re)connect.
+   * Only real refusals (401, 403 `chat_disabled`, …) end the iterable with a
+   * throw. `autoReconnect: false` returns the single connection instead
+   * (yields `close`, then throws on any drop).
    */
-  async live(opts: { channels?: string[]; as?: string } = {}): Promise<ChatStream> {
+  async live(opts: { channels?: string[]; as?: string } & ReconnectOptions = {}): Promise<ChatStream> {
     const externalPlayerId = await resolvePlayerId(this.client, opts.as, 'chat.live');
-    return openChatStream({
+    const args = (onActivity?: () => void) => ({
       fetchImpl: this.client.fetchForStreaming,
       baseUrl: this.client.baseUrl,
       externalPlayerId,
@@ -2482,23 +2812,103 @@ export class ChatClient {
       sdkUserAgent: this.client.sdkUserAgent,
       channels: opts.channels ?? [],
       filter: this.client.chatFilter,
+      ...(onActivity ? { onActivity } : {}),
+    });
+    if (opts.autoReconnect === false) return openChatStream(args());
+
+    // Last `seq` known per conversation: the catch-up cursor and the dedupe key.
+    const lastSeq = new Map<string, number>();
+    // Whether a `ready` has seeded the cursors from `lastSeqs` (servers that
+    // send it): after that, a followed conversation without a cursor is new.
+    let seeded = false;
+    const self = this;
+    async function* catchUp(ready: ChatStreamEvent | null, reconnect: boolean): AsyncGenerator<ChatStreamEvent, void, unknown> {
+      const r = ready?.kind === 'ready' ? ready : null;
+      const lastSeqs = r?.lastSeqs ?? null;
+      const seededBefore = seeded;
+      if (lastSeqs && !seeded) {
+        // Every followed conversation's seq at connect time: quiet ones get a cursor too.
+        for (const [id, seq] of Object.entries(lastSeqs)) {
+          if (!lastSeq.has(id) && typeof seq === 'number') lastSeq.set(id, seq);
+        }
+        seeded = true;
+      }
+      if (!reconnect) return;
+      if (r && seededBefore) {
+        // Followed now but no cursor: it appeared during the gap, so its whole history is missed.
+        const followed = [...(r.conversationIds ?? []), ...(r.channels ?? []).map((c) => c.conversationId), ...Object.keys(lastSeqs ?? {})];
+        for (const id of followed) if (!lastSeq.has(id)) lastSeq.set(id, 0);
+      }
+      for (const conversationId of [...lastSeq.keys()]) {
+        let after = lastSeq.get(conversationId);
+        // The server says nothing is newer than what we have: skip the request.
+        const head = lastSeqs?.[conversationId];
+        if (after !== undefined && typeof head === 'number' && head <= after) continue;
+        while (after !== undefined) {
+          let page: ChatMessagePage;
+          try {
+            page = await self.messages(conversationId, { after, ...(opts.as ? { as: opts.as } : {}) });
+          } catch (err) {
+            // Left the conversation, or it's gone: stop following it.
+            if (isFatalStreamError(err)) {
+              lastSeq.delete(conversationId);
+              break;
+            }
+            throw err;
+          }
+          for (const m of page.messages) yield { ...m, kind: 'message' };
+          const last = page.messages[page.messages.length - 1];
+          // An empty page that says `hasMore` (every message hidden from this
+          // player) stops here with the cursor unchanged: the next reconnect
+          // retries, and this never spins.
+          after = page.hasMore && last ? last.seq : undefined;
+        }
+      }
+    }
+
+    return openReconnectingStream<ChatStreamEvent>({
+      open: (onActivity) => openChatSse(args(onActivity)),
+      map: mapChatEvent,
+      catchUp,
+      accept: (ev) => {
+        if (ev.kind === 'message') {
+          const prev = lastSeq.get(ev.conversationId);
+          if (prev !== undefined && ev.seq <= prev) return false;
+          lastSeq.set(ev.conversationId, ev.seq);
+        } else if (ev.kind === 'conversation_added') {
+          // New to the player: its whole history counts as missed on a reconnect.
+          if (!lastSeq.has(ev.conversationId)) lastSeq.set(ev.conversationId, 0);
+        } else if (ev.kind === 'conversation_removed') {
+          lastSeq.delete(ev.conversationId);
+        }
+        return true;
+      },
+      ...(opts.heartbeatTimeoutMs !== undefined ? { heartbeatTimeoutMs: opts.heartbeatTimeoutMs } : {}),
     });
   }
 
-  /** Callback form of {@link ChatClient.live}. Returns a stop function. */
+  /**
+   * Callback form of {@link ChatClient.live} (self-healing the same way).
+   * `onError` only receives real refusals (the stream is over by then).
+   * Returns a stop function; calling it more than once is safe.
+   */
   async watch(
     handler: (event: ChatStreamEvent) => void,
-    opts: { channels?: string[]; onError?: (err: unknown) => void; as?: string } = {},
+    opts: { channels?: string[]; onError?: (err: unknown) => void; as?: string } & ReconnectOptions = {},
   ): Promise<() => Promise<void>> {
-    const stream = await this.live({
-      ...(opts.channels ? { channels: opts.channels } : {}),
-      ...(opts.as ? { as: opts.as } : {}),
-    });
+    const { onError, ...liveOpts } = opts;
+    const stream = await this.live(liveOpts);
     void (async () => {
       try {
-        for await (const ev of stream.events) handler(ev);
+        for await (const ev of stream.events) {
+          try {
+            handler(ev);
+          } catch (err) {
+            onError?.(err);
+          }
+        }
       } catch (err) {
-        opts.onError?.(err);
+        onError?.(err);
       }
     })();
     return () => stream.close();

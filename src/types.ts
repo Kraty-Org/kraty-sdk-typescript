@@ -1747,7 +1747,22 @@ export interface ChatChannel {
   description: string | null;
   /** `server_only`: announcements; players read but can't post. */
   postPolicy: 'players' | 'server_only';
+  /** The channel's own cooldown (0 = the channel kind's). */
   slowModeSeconds: number;
+  /**
+   * Seconds a player waits between two messages here: the larger of the
+   * channel kind's and the channel's own, never under 15. Sending sooner is
+   * refused with 429 `chat_slow_mode`.
+   */
+  cooldownSeconds: number;
+  /** Players per room (null = one room for everyone). */
+  roomSize: number | null;
+  /**
+   * The viewer's room (0-based). Big channels split into rooms, each its own
+   * conversation; the server places players automatically and stickily.
+   * Announcements reach every room.
+   */
+  room: number;
   /** Who may post (reading is open). */
   requirement: { itemKey: string; threshold: number } | null;
   metadata: Record<string, unknown>;
@@ -1830,10 +1845,12 @@ export interface ModerationStatus {
 
 /** The game's chat rules, as this player sees them. */
 export interface ChatClientConfig {
-  kinds: Record<string, { enabled: boolean; profanityFilter: string } & Record<string, unknown>>;
+  /** Per kind; `cooldownSeconds` = seconds between two messages of a player in one conversation of that kind. */
+  kinds: Record<string, { enabled: boolean; profanityFilter: string; cooldownSeconds: number } & Record<string, unknown>>;
   channels: Array<ChatChannel & { profanityFilter: string }>;
   messages: ChatMessageRules;
-  rateLimit: { messagesPerMinute: number };
+  /** `duplicateWindowSeconds`: the same text again in a conversation within this window is refused (0 = off). */
+  rateLimit: { messagesPerMinute: number; duplicateWindowSeconds: number };
   preferences: ChatPreferences;
   status: ModerationStatus;
 }
