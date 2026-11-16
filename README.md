@@ -23,9 +23,9 @@ repo against a tagged release. Each release ships compiled `dist/`
 artefacts so no build step is needed on your side.
 
 ```sh
-npm install github:Kraty-Org/kraty-sdk-typescript#v0.30.0
+npm install github:Kraty-Org/kraty-sdk-typescript#v0.29.1
 # or with pnpm:
-pnpm add github:Kraty-Org/kraty-sdk-typescript#v0.30.0
+pnpm add github:Kraty-Org/kraty-sdk-typescript#v0.29.1
 ```
 
 Browse releases at

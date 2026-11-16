@@ -1,4 +1,5 @@
-import { KratyClient } from './client.js';
+import { KratyClient, defaultIdempotencyKey } from './client.js';
+import { openChatStream, type ChatStream, type ChatStreamEvent } from './chat-stream.js';
 import { KratyApiError } from './errors.js';
 import { MembershipKind } from './finalization.js';
 import {
@@ -12,9 +13,22 @@ import {
   type InventoryStreamEvent,
 } from './inventory-stream.js';
 import type {
+  ChatClientConfig,
+  ChatConversation,
+  ChatConversationDetail,
+  ChatConversationPage,
+  ChatMessage,
+  ChatMessagePage,
+  ChatPreferences,
+  ChatUnread,
+  ModerationStatus,
+  MyReport,
+  ReportInput,
+  Restriction,
   BoardStandings,
   BlockedPlayer,
   Catalog,
+  DailyLogin,
   ConsumeItemInput,
   ConsumeItemResult,
   DebitWalletInput,
@@ -24,6 +38,12 @@ import type {
   EventLeaderboard,
   EventLeaderboardReadOptions,
   EventListing,
+  EventTeamMembersPage,
+  TeamMatchResult,
+  PartnerInvite,
+  RandomPartnerResult,
+  PartnerSuggestion,
+  TeamSeatView,
   Friend,
   FriendCode,
   FriendRequests,
@@ -36,6 +56,7 @@ import type {
   GrantSelfInput,
   Suggestion,
   Leaderboard,
+  LeaderboardSummary,
   LeaderboardPeriods,
   LeaderboardReadOptions,
   LeaderboardScoreResult,
@@ -56,6 +77,20 @@ import type {
   SyntheticIdentity,
   TrackPurchaseInput,
   TrackPurchaseResult,
+  CreateGuildInput,
+  GuildClientConfig,
+  GuildDetail,
+  GuildHelpDonation,
+  GuildHelpOverview,
+  GuildHelpRequest,
+  GuildJoinRequest,
+  GuildJoinResult,
+  GuildLeaveResult,
+  GuildProfilePatch,
+  GuildSearchPage,
+  GuildSummary,
+  MyGuild,
+  RecommendedGuild,
 } from './types.js';
 
 /** Wrapper helper: every response from the SDK API is `{ data: T }`. */
@@ -188,6 +223,164 @@ export class EventsClient {
     );
     return env.data;
   }
+
+  /**
+   * GET /sdk/v1/players/:p/event-teams/:eventTeamId/members: your team's
+   * members in rank order (by contribution), with `isSelf` on your row.
+   * Only a member of the team may read it. Your own team score, goal and
+   * milestones already come back on `listForPlayer` / `start` / `progress`
+   * as `teams`; call this when you open a team roster view. Page with
+   * `cursor` (the previous page's `nextCursor`).
+   */
+  async teamMembers(
+    eventTeamId: string,
+    opts: { cursor?: string; limit?: number; as?: string } = {},
+  ): Promise<EventTeamMembersPage> {
+    const externalPlayerId = await resolvePlayerId(this.client, opts.as, 'events.teamMembers');
+    const qs = new URLSearchParams();
+    if (opts.cursor) qs.set('cursor', opts.cursor);
+    if (opts.limit !== undefined) qs.set('limit', String(opts.limit));
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    const env = await this.client.request<DataEnvelope<EventTeamMembersPage>>(
+      'GET',
+      `/sdk/v1/players/${encodeURIComponent(externalPlayerId)}/event-teams/${encodeURIComponent(
+        eventTeamId,
+      )}/members${suffix}`,
+    );
+    return env.data;
+  }
+
+  private eventPath(externalPlayerId: string, eventKey: string, rest: string): string {
+    return `/sdk/v1/players/${encodeURIComponent(externalPlayerId)}/events/${encodeURIComponent(eventKey)}${rest}`;
+  }
+
+  /**
+   * POST …/events/:eventKey/teams/match: your auto-matched team for the
+   * active window, found or opened (`auto_match` events). Idempotent;
+   * `start` matches a team-less player too, so this is optional.
+   */
+  async matchTeam(
+    eventKey: string,
+    opts: { idempotencyKey?: string; as?: string } = {},
+  ): Promise<TeamMatchResult> {
+    const externalPlayerId = await resolvePlayerId(this.client, opts.as, 'events.matchTeam');
+    const env = await this.client.request<DataEnvelope<TeamMatchResult>>(
+      'POST',
+      this.eventPath(externalPlayerId, eventKey, '/teams/match'),
+      opts.idempotencyKey ? { idempotencyKey: opts.idempotencyKey } : {},
+    );
+    return env.data;
+  }
+
+  /**
+   * POST …/partners/invites: invite a partner by external id or friend
+   * code (`partner_slots` events). Their pending invite to you is accepted
+   * instead (`status: 'accepted'`).
+   */
+  async invitePartner(
+    eventKey: string,
+    target: { externalPlayerId: string } | { friendCode: string },
+    opts: { idempotencyKey?: string; as?: string } = {},
+  ): Promise<PartnerInvite> {
+    const externalPlayerId = await resolvePlayerId(this.client, opts.as, 'events.invitePartner');
+    const env = await this.client.request<DataEnvelope<PartnerInvite>>(
+      'POST',
+      this.eventPath(externalPlayerId, eventKey, '/partners/invites'),
+      { ...target, ...(opts.idempotencyKey ? { idempotencyKey: opts.idempotencyKey } : {}) },
+    );
+    return env.data;
+  }
+
+  /** GET …/partners/invites: pending invites to you (`in`, default) or from you (`out`). */
+  async partnerInvites(
+    eventKey: string,
+    opts: { direction?: 'in' | 'out'; as?: string } = {},
+  ): Promise<PartnerInvite[]> {
+    const externalPlayerId = await resolvePlayerId(this.client, opts.as, 'events.partnerInvites');
+    const env = await this.client.request<DataEnvelope<PartnerInvite[]>>(
+      'GET',
+      this.eventPath(externalPlayerId, eventKey, `/partners/invites?direction=${opts.direction ?? 'in'}`),
+    );
+    return env.data;
+  }
+
+  /** Accept an invite sent to you: the pair's bar goes live. */
+  async acceptInvite(
+    eventKey: string,
+    eventTeamId: string,
+    opts: { idempotencyKey?: string; as?: string } = {},
+  ): Promise<PartnerInvite & { teams: TeamSeatView[] }> {
+    return this.answerInvite<PartnerInvite & { teams: TeamSeatView[] }>(eventKey, eventTeamId, 'accept', opts);
+  }
+
+  /** Decline an invite sent to you (both slots free up). */
+  async declineInvite(
+    eventKey: string,
+    eventTeamId: string,
+    opts: { idempotencyKey?: string; as?: string } = {},
+  ): Promise<PartnerInvite> {
+    return this.answerInvite<PartnerInvite>(eventKey, eventTeamId, 'decline', opts);
+  }
+
+  /** Withdraw an invite you sent (both slots free up). */
+  async cancelInvite(
+    eventKey: string,
+    eventTeamId: string,
+    opts: { idempotencyKey?: string; as?: string } = {},
+  ): Promise<PartnerInvite> {
+    return this.answerInvite<PartnerInvite>(eventKey, eventTeamId, 'cancel', opts);
+  }
+
+  private async answerInvite<T>(
+    eventKey: string,
+    eventTeamId: string,
+    action: 'accept' | 'decline' | 'cancel',
+    opts: { idempotencyKey?: string; as?: string },
+  ): Promise<T> {
+    const externalPlayerId = await resolvePlayerId(this.client, opts.as, `events.${action}Invite`);
+    const env = await this.client.request<DataEnvelope<T>>(
+      'POST',
+      this.eventPath(
+        externalPlayerId,
+        eventKey,
+        `/partners/invites/${encodeURIComponent(eventTeamId)}/${action}`,
+      ),
+      opts.idempotencyKey ? { idempotencyKey: opts.idempotencyKey } : {},
+    );
+    return env.data;
+  }
+
+  /**
+   * POST …/partners/random: pair with someone waiting for a random
+   * partner, or open a bar that waits for one (solo after the event's
+   * fallback time).
+   */
+  async randomPartner(
+    eventKey: string,
+    opts: { idempotencyKey?: string; as?: string } = {},
+  ): Promise<RandomPartnerResult> {
+    const externalPlayerId = await resolvePlayerId(this.client, opts.as, 'events.randomPartner');
+    const env = await this.client.request<DataEnvelope<RandomPartnerResult>>(
+      'POST',
+      this.eventPath(externalPlayerId, eventKey, '/partners/random'),
+      opts.idempotencyKey ? { idempotencyKey: opts.idempotencyKey } : {},
+    );
+    return env.data;
+  }
+
+  /** GET …/partners/suggestions: friends first, then recently active players with a free slot. */
+  async partnerSuggestions(
+    eventKey: string,
+    opts: { limit?: number; as?: string } = {},
+  ): Promise<PartnerSuggestion[]> {
+    const externalPlayerId = await resolvePlayerId(this.client, opts.as, 'events.partnerSuggestions');
+    const qs = opts.limit !== undefined ? `?limit=${opts.limit}` : '';
+    const env = await this.client.request<DataEnvelope<PartnerSuggestion[]>>(
+      'GET',
+      this.eventPath(externalPlayerId, eventKey, `/partners/suggestions${qs}`),
+    );
+    return env.data;
+  }
 }
 
 /**
@@ -198,6 +391,18 @@ export class EventsClient {
  */
 export class LeaderboardsClient {
   constructor(private readonly client: KratyClient) {}
+
+  /**
+   * GET /sdk/v1/leaderboards: the game's configured boards (archived ones
+   * left out), so the client can discover keys instead of hard-coding them.
+   */
+  async list(): Promise<LeaderboardSummary[]> {
+    const env = await this.client.request<DataEnvelope<LeaderboardSummary[]>>(
+      'GET',
+      '/sdk/v1/leaderboards',
+    );
+    return env.data;
+  }
 
   /**
    * GET /sdk/v1/leaderboards/:key: snapshot read of a
@@ -506,12 +711,25 @@ export class EventLeaderboardsClient {
     };
 
     const consumeSse = async (): Promise<void> => {
+      let handle: LeaderboardStream;
       try {
-        streamHandle = await this.live(leaderboardId);
+        handle = await this.live(leaderboardId);
       } catch (err) {
-        try { onError(err); } catch { /* swallow */ }
+        if (!closed) {
+          try { onError(err); } catch { /* swallow */ }
+        }
         return;
       }
+      // close() ran while the stream was still connecting, so it had no
+      // handle to abort. Close it now or the HTTP connection stays open
+      // forever (browsers cap connections per host, so a few leaks starve
+      // every other request; React StrictMode's mount/unmount/mount hits
+      // this on every subscribe).
+      if (closed) {
+        try { await handle.close(); } catch { /* swallow */ }
+        return;
+      }
+      streamHandle = handle;
       try {
         for await (const ev of streamHandle.events) {
           surface(ev);
@@ -1459,6 +1677,266 @@ export class CatalogClient {
   }
 }
 
+/**
+ * Resource client for `/sdk/v1/players/:p/daily-login`: the game's daily
+ * login calendar. Read-only; the server pays each day's reward on the
+ * player's first session of that UTC day (a call on first contact or after
+ * 30 minutes of silence opens one), as a grant with
+ * `sourceKind: 'daily_login'`.
+ */
+export class DailyLoginClient {
+  constructor(private readonly client: KratyClient) {}
+
+  /**
+   * GET `/sdk/v1/players/:p/daily-login`. Resolves to `null` when the game
+   * has no calendar or it is switched off for this key's environment.
+   * When this request is the one that opens a session, today is already
+   * paid in the result; a player still in a session from before midnight
+   * UTC is paid on their next one.
+   */
+  async read(opts: { as?: string } = {}): Promise<DailyLogin | null> {
+    const externalPlayerId = await resolvePlayerId(this.client, opts.as, 'dailyLogin.read');
+    const env = await this.client.request<DataEnvelope<DailyLogin | null>>(
+      'GET',
+      `/sdk/v1/players/${encodeURIComponent(externalPlayerId)}/daily-login`,
+    );
+    return env.data ?? null;
+  }
+}
+
+/**
+ * Guilds (docs/25): persistent player groups, one per player, up to 50
+ * members, with leader / co-leader / member roles. Every method acts as the
+ * active player (or `{ as }`); the game and environment come from the key.
+ *
+ * Start screens from `config()`: it carries the unlock gate (and whether the
+ * player passes it), the create cost, what each role may do and the help
+ * and score settings, so nothing is hardcoded in the client.
+ */
+export class GuildsClient {
+  constructor(private readonly client: KratyClient) {}
+
+  private async base(as: string | undefined, op: string): Promise<string> {
+    const externalPlayerId = await resolvePlayerId(this.client, as, op);
+    return `/sdk/v1/players/${encodeURIComponent(externalPlayerId)}`;
+  }
+
+  /** GET `/guilds/config`: the game's guild rules for this player. */
+  async config(opts: { as?: string } = {}): Promise<GuildClientConfig> {
+    const base = await this.base(opts.as, 'guilds.config');
+    return (await this.client.request<DataEnvelope<GuildClientConfig>>('GET', `${base}/guilds/config`)).data;
+  }
+
+  /** GET `/guild`: the player's guild, role, permissions and week; null when guildless. */
+  async mine(opts: { as?: string } = {}): Promise<MyGuild | null> {
+    const base = await this.base(opts.as, 'guilds.mine');
+    return (await this.client.request<DataEnvelope<MyGuild | null>>('GET', `${base}/guild`)).data ?? null;
+  }
+
+  /** GET `/guilds/:guildId`: any guild of this game with its roster. */
+  async get(guildId: string, opts: { as?: string } = {}): Promise<GuildDetail> {
+    const base = await this.base(opts.as, 'guilds.get');
+    return (
+      await this.client.request<DataEnvelope<GuildDetail>>('GET', `${base}/guilds/${encodeURIComponent(guildId)}`)
+    ).data;
+  }
+
+  /** GET `/guilds?q=`: name search, prefix matches first (the first page; see `searchPage`). */
+  async search(
+    query: string,
+    opts: { country?: string; limit?: number; offset?: number; as?: string } = {},
+  ): Promise<GuildSummary[]> {
+    return (await this.searchPage(query, opts)).guilds;
+  }
+
+  /**
+   * GET `/guilds?q=&offset=`: one page of name search (`limit` default 20,
+   * max 50) and the `nextOffset` to ask for the next one (null at the end).
+   */
+  async searchPage(
+    query: string,
+    opts: { country?: string; limit?: number; offset?: number; as?: string } = {},
+  ): Promise<GuildSearchPage> {
+    const base = await this.base(opts.as, 'guilds.search');
+    const params = new URLSearchParams({ q: query });
+    if (opts.country) params.set('country', opts.country);
+    if (opts.limit !== undefined) params.set('limit', String(opts.limit));
+    if (opts.offset) params.set('offset', String(opts.offset));
+    const data = (
+      await this.client.request<DataEnvelope<{ guilds: GuildSummary[]; nextOffset?: number | null }>>(
+        'GET',
+        `${base}/guilds?${params.toString()}`,
+      )
+    ).data;
+    return { guilds: data.guilds, nextOffset: data.nextOffset ?? null };
+  }
+
+  /** GET `/guilds/recommended`: guilds with room, friends' guilds first; varies between calls. */
+  async recommended(
+    opts: { country?: string; limit?: number; as?: string } = {},
+  ): Promise<RecommendedGuild[]> {
+    const base = await this.base(opts.as, 'guilds.recommended');
+    const params = new URLSearchParams();
+    if (opts.country) params.set('country', opts.country);
+    if (opts.limit !== undefined) params.set('limit', String(opts.limit));
+    const qs = params.toString();
+    return (
+      await this.client.request<DataEnvelope<{ guilds: RecommendedGuild[] }>>(
+        'GET',
+        `${base}/guilds/recommended${qs ? `?${qs}` : ''}`,
+      )
+    ).data.guilds;
+  }
+
+  /** POST `/guilds`: found a guild (gate checked, cost charged atomically); you lead it. */
+  async create(input: CreateGuildInput, opts: { as?: string } = {}): Promise<MyGuild> {
+    const base = await this.base(opts.as, 'guilds.create');
+    return (await this.client.request<DataEnvelope<MyGuild>>('POST', `${base}/guilds`, input)).data;
+  }
+
+  /** POST `/guilds/:guildId/join`: join an open guild, or ask to join a request guild. */
+  async join(guildId: string, opts: { message?: string; as?: string } = {}): Promise<GuildJoinResult> {
+    const base = await this.base(opts.as, 'guilds.join');
+    const body: { message?: string } = {};
+    if (opts.message !== undefined) body.message = opts.message;
+    return (
+      await this.client.request<DataEnvelope<GuildJoinResult>>(
+        'POST',
+        `${base}/guilds/${encodeURIComponent(guildId)}/join`,
+        body,
+      )
+    ).data;
+  }
+
+  /** GET `/guild-requests`: your pending join requests. */
+  async myRequests(opts: { as?: string } = {}): Promise<GuildJoinRequest[]> {
+    const base = await this.base(opts.as, 'guilds.myRequests');
+    return (await this.client.request<DataEnvelope<{ requests: GuildJoinRequest[] }>>('GET', `${base}/guild-requests`))
+      .data.requests;
+  }
+
+  /** DELETE `/guild-requests/:requestId`: withdraw one of your join requests. */
+  async cancelRequest(requestId: string, opts: { as?: string } = {}): Promise<void> {
+    const base = await this.base(opts.as, 'guilds.cancelRequest');
+    await this.client.request<unknown>('DELETE', `${base}/guild-requests/${encodeURIComponent(requestId)}`);
+  }
+
+  /** PATCH `/guild`: edit the profile (needs `edit_profile`). */
+  async updateProfile(patch: GuildProfilePatch, opts: { as?: string } = {}): Promise<GuildDetail> {
+    const base = await this.base(opts.as, 'guilds.updateProfile');
+    return (await this.client.request<DataEnvelope<GuildDetail>>('PATCH', `${base}/guild`, patch)).data;
+  }
+
+  /** POST `/guild/leave`: a leaving leader hands over; the last one out disbands. */
+  async leave(opts: { as?: string } = {}): Promise<GuildLeaveResult> {
+    const base = await this.base(opts.as, 'guilds.leave');
+    return (await this.client.request<DataEnvelope<GuildLeaveResult>>('POST', `${base}/guild/leave`)).data;
+  }
+
+  /** GET `/guild/requests`: your guild's pending join requests (needs `accept_requests`). */
+  async requests(opts: { as?: string } = {}): Promise<GuildJoinRequest[]> {
+    const base = await this.base(opts.as, 'guilds.requests');
+    return (await this.client.request<DataEnvelope<{ requests: GuildJoinRequest[] }>>('GET', `${base}/guild/requests`))
+      .data.requests;
+  }
+
+  /** POST `/guild/requests/:requestId/accept`: the player joins (checks re-run now). */
+  async acceptRequest(requestId: string, opts: { as?: string } = {}): Promise<GuildDetail> {
+    const base = await this.base(opts.as, 'guilds.acceptRequest');
+    return (
+      await this.client.request<DataEnvelope<GuildDetail>>(
+        'POST',
+        `${base}/guild/requests/${encodeURIComponent(requestId)}/accept`,
+      )
+    ).data;
+  }
+
+  /** POST `/guild/requests/:requestId/decline`. */
+  async declineRequest(requestId: string, opts: { as?: string } = {}): Promise<void> {
+    const base = await this.base(opts.as, 'guilds.declineRequest');
+    await this.client.request<unknown>('POST', `${base}/guild/requests/${encodeURIComponent(requestId)}/decline`);
+  }
+
+  /** POST `/guild/members/:id/kick`: they can't rejoin this guild for the configured block. */
+  async kick(memberExternalId: string, opts: { as?: string } = {}): Promise<GuildDetail> {
+    return this.memberAction('kick', memberExternalId, opts.as);
+  }
+
+  /** POST `/guild/members/:id/promote`: member → co-leader. */
+  async promote(memberExternalId: string, opts: { as?: string } = {}): Promise<GuildDetail> {
+    return this.memberAction('promote', memberExternalId, opts.as);
+  }
+
+  /** POST `/guild/members/:id/demote`: co-leader → member. */
+  async demote(memberExternalId: string, opts: { as?: string } = {}): Promise<GuildDetail> {
+    return this.memberAction('demote', memberExternalId, opts.as);
+  }
+
+  private async memberAction(
+    verb: 'kick' | 'promote' | 'demote',
+    memberExternalId: string,
+    as: string | undefined,
+  ): Promise<GuildDetail> {
+    const base = await this.base(as, `guilds.${verb}`);
+    return (
+      await this.client.request<DataEnvelope<GuildDetail>>(
+        'POST',
+        `${base}/guild/members/${encodeURIComponent(memberExternalId)}/${verb}`,
+      )
+    ).data;
+  }
+
+  /** POST `/guild/leader`: hand leadership to a member (leader only; you become co-leader). */
+  async transferLeadership(memberExternalId: string, opts: { as?: string } = {}): Promise<GuildDetail> {
+    const base = await this.base(opts.as, 'guilds.transferLeadership');
+    return (
+      await this.client.request<DataEnvelope<GuildDetail>>('POST', `${base}/guild/leader`, {
+        externalPlayerId: memberExternalId,
+      })
+    ).data;
+  }
+
+  /** GET `/guild/help`: open help requests, yours, and your weekly helps counter. */
+  async help(opts: { as?: string } = {}): Promise<GuildHelpOverview> {
+    const base = await this.base(opts.as, 'guilds.help');
+    return (await this.client.request<DataEnvelope<GuildHelpOverview>>('GET', `${base}/guild/help`)).data;
+  }
+
+  /** POST `/guild/help`: ask guildmates for a resource on the game's help list. */
+  async requestHelp(
+    input: { type: 'item' | 'currency'; resourceKey: string; amount: number },
+    opts: { as?: string } = {},
+  ): Promise<GuildHelpRequest> {
+    const base = await this.base(opts.as, 'guilds.requestHelp');
+    return (await this.client.request<DataEnvelope<GuildHelpRequest>>('POST', `${base}/guild/help`, input)).data;
+  }
+
+  /** POST `/guild/help/:requestId/donate`: delivered to them as a grant; may reward you. */
+  async donate(requestId: string, opts: { amount?: number; as?: string } = {}): Promise<GuildHelpDonation> {
+    const base = await this.base(opts.as, 'guilds.donate');
+    const body: { amount?: number } = {};
+    if (opts.amount !== undefined) body.amount = opts.amount;
+    return (
+      await this.client.request<DataEnvelope<GuildHelpDonation>>(
+        'POST',
+        `${base}/guild/help/${encodeURIComponent(requestId)}/donate`,
+        body,
+      )
+    ).data;
+  }
+
+  /** DELETE `/guild/help/:requestId`: withdraw your own help request. */
+  async cancelHelp(requestId: string, opts: { as?: string } = {}): Promise<GuildHelpRequest> {
+    const base = await this.base(opts.as, 'guilds.cancelHelp');
+    return (
+      await this.client.request<DataEnvelope<GuildHelpRequest>>(
+        'DELETE',
+        `${base}/guild/help/${encodeURIComponent(requestId)}`,
+      )
+    ).data;
+  }
+}
+
 export class LobbiesClient {
   constructor(private readonly client: KratyClient) {}
 
@@ -1570,3 +2048,343 @@ function sleepAbortable(ms: number, signal?: AbortSignal): Promise<void> {
 
 // Re-export for index aggregation.
 export type { KratyApiError };
+
+// ── Chat (docs: chat.mdx) ──────────────────────────────────────────────
+
+/** Options shared by sends: reply threading and a retry-safe client id. */
+export interface ChatSendOptions {
+  replyToId?: string;
+  /** Retry-safe: the same id returns the same message. Generated when omitted. */
+  clientMessageId?: string;
+  as?: string;
+}
+
+/**
+ * `kraty.chat`: direct messages, groups, guild chat and the game's public
+ * channels (a paid add-on the studio enables per game; every call answers
+ * `403 chat_disabled` when it's off). Conversations of every kind share one
+ * shape and one set of message calls; `live()` streams them all.
+ *
+ * The profanity filter is resolved by the server per player: pass
+ * `chat: { profanityFilter }` to the `Kraty` options (or call
+ * `kraty.client.setChatFilter`) to choose for this player.
+ */
+export class ChatClient {
+  constructor(private readonly client: KratyClient) {}
+
+  private async base(as: string | undefined, op: string): Promise<string> {
+    const externalPlayerId = await resolvePlayerId(this.client, as, op);
+    return `/sdk/v1/players/${encodeURIComponent(externalPlayerId)}/chat`;
+  }
+
+  private conv(id: string): string {
+    return `/conversations/${encodeURIComponent(id)}`;
+  }
+
+  private async get<T>(as: string | undefined, op: string, path: string): Promise<T> {
+    const base = await this.base(as, op);
+    return (await this.client.request<DataEnvelope<T>>('GET', `${base}${path}`)).data;
+  }
+
+  private async send_<T>(as: string | undefined, op: string, method: string, path: string, body?: unknown): Promise<T> {
+    const base = await this.base(as, op);
+    return (await this.client.request<DataEnvelope<T>>(method, `${base}${path}`, body)).data;
+  }
+
+  /** GET `/chat/config`: kinds, channels, limits, custom card types, preferences and standing. */
+  async config(opts: { as?: string } = {}): Promise<ChatClientConfig> {
+    return this.get(opts.as, 'chat.config', '/config');
+  }
+
+  /** GET `/chat/preferences`. */
+  async preferences(opts: { as?: string } = {}): Promise<ChatPreferences> {
+    return this.get(opts.as, 'chat.preferences', '/preferences');
+  }
+
+  /** PUT `/chat/preferences`: the saved filter choice (null = defaults) and who may DM the player. */
+  async setPreferences(
+    patch: { profanityFilter?: boolean | null; allowDirectFrom?: ChatPreferences['allowDirectFrom'] },
+    opts: { as?: string } = {},
+  ): Promise<ChatPreferences> {
+    return this.send_(opts.as, 'chat.setPreferences', 'PUT', '/preferences', patch);
+  }
+
+  /** GET `/chat/conversations`: the inbox, most recent first, with unread counts. */
+  async conversations(
+    opts: { kind?: string; limit?: number; offset?: number; as?: string } = {},
+  ): Promise<ChatConversationPage> {
+    const params = new URLSearchParams();
+    if (opts.kind) params.set('kind', opts.kind);
+    if (opts.limit !== undefined) params.set('limit', String(opts.limit));
+    if (opts.offset) params.set('offset', String(opts.offset));
+    const qs = params.toString();
+    return this.get(opts.as, 'chat.conversations', `/conversations${qs ? `?${qs}` : ''}`);
+  }
+
+  /** GET `/chat/unread`: unread totals for a badge (muted conversations don't count). */
+  async unread(opts: { as?: string } = {}): Promise<ChatUnread> {
+    return this.get(opts.as, 'chat.unread', '/unread');
+  }
+
+  /** GET `/chat/conversations/:id`: one conversation (with members for direct and group). */
+  async conversation(conversationId: string, opts: { as?: string } = {}): Promise<ChatConversationDetail> {
+    return this.get(opts.as, 'chat.conversation', this.conv(conversationId));
+  }
+
+  /** POST `/chat/direct`: open (or find) the direct conversation with another player. */
+  async openDirect(
+    target: { externalPlayerId: string } | { friendCode: string },
+    opts: { as?: string } = {},
+  ): Promise<ChatConversation> {
+    return this.send_(opts.as, 'chat.openDirect', 'POST', '/direct', target);
+  }
+
+  /** POST `/chat/groups`: create a group; the caller is its owner. */
+  async createGroup(
+    input: { title: string; externalPlayerIds?: string[]; metadata?: Record<string, unknown> },
+    opts: { as?: string } = {},
+  ): Promise<ChatConversationDetail> {
+    return this.send_(opts.as, 'chat.createGroup', 'POST', '/groups', input);
+  }
+
+  /** PATCH `/chat/conversations/:id`: rename / edit a group (owner, admins). */
+  async updateGroup(
+    conversationId: string,
+    patch: { title?: string; metadata?: Record<string, unknown> },
+    opts: { as?: string } = {},
+  ): Promise<ChatConversationDetail> {
+    return this.send_(opts.as, 'chat.updateGroup', 'PATCH', this.conv(conversationId), patch);
+  }
+
+  /** POST `/chat/conversations/:id/members`: add players to a group (owner, admins). */
+  async addMembers(
+    conversationId: string,
+    externalPlayerIds: string[],
+    opts: { as?: string } = {},
+  ): Promise<ChatConversationDetail> {
+    return this.send_(opts.as, 'chat.addMembers', 'POST', `${this.conv(conversationId)}/members`, { externalPlayerIds });
+  }
+
+  /** DELETE `/chat/conversations/:id/members/:externalPlayerId`: remove a lower-ranked member (or yourself). */
+  async removeMember(
+    conversationId: string,
+    externalPlayerId: string,
+    opts: { as?: string } = {},
+  ): Promise<{ conversationId: string; removed: string }> {
+    return this.send_(
+      opts.as,
+      'chat.removeMember',
+      'DELETE',
+      `${this.conv(conversationId)}/members/${encodeURIComponent(externalPlayerId)}`,
+    );
+  }
+
+  /** PUT `/chat/conversations/:id/members/:externalPlayerId/role` (owner only; `owner` hands the group over). */
+  async setRole(
+    conversationId: string,
+    externalPlayerId: string,
+    role: 'owner' | 'admin' | 'member',
+    opts: { as?: string } = {},
+  ): Promise<ChatConversationDetail> {
+    return this.send_(
+      opts.as,
+      'chat.setRole',
+      'PUT',
+      `${this.conv(conversationId)}/members/${encodeURIComponent(externalPlayerId)}/role`,
+      { role },
+    );
+  }
+
+  /** POST `/chat/conversations/:id/leave`: leave a group, or hide a direct conversation. */
+  async leave(conversationId: string, opts: { as?: string } = {}): Promise<{ conversationId: string; left: true }> {
+    return this.send_(opts.as, 'chat.leave', 'POST', `${this.conv(conversationId)}/leave`);
+  }
+
+  /** GET `/chat/guild`: the player's guild conversation. */
+  async guild(opts: { as?: string } = {}): Promise<ChatConversation> {
+    return this.get(opts.as, 'chat.guild', '/guild');
+  }
+
+  /** GET `/chat/channels`: every public channel. */
+  async channels(opts: { as?: string } = {}): Promise<ChatConversation[]> {
+    return (await this.get<{ channels: ChatConversation[] }>(opts.as, 'chat.channels', '/channels')).channels;
+  }
+
+  /** GET `/chat/channels/:key`: one public channel. */
+  async channel(key: string, opts: { as?: string } = {}): Promise<ChatConversation> {
+    return this.get(opts.as, 'chat.channel', `/channels/${encodeURIComponent(key)}`);
+  }
+
+  /**
+   * GET `/chat/conversations/:id/messages`: a page, oldest to newest.
+   * `before` pages back through history; `after` catches up from a known seq.
+   */
+  async messages(
+    conversationId: string,
+    opts: { before?: number; after?: number; limit?: number; as?: string } = {},
+  ): Promise<ChatMessagePage> {
+    const params = new URLSearchParams();
+    if (opts.before !== undefined) params.set('before', String(opts.before));
+    if (opts.after !== undefined) params.set('after', String(opts.after));
+    if (opts.limit !== undefined) params.set('limit', String(opts.limit));
+    const qs = params.toString();
+    return this.get(opts.as, 'chat.messages', `${this.conv(conversationId)}/messages${qs ? `?${qs}` : ''}`);
+  }
+
+  /** POST `/chat/conversations/:id/messages`: send text. */
+  async send(conversationId: string, text: string, opts: ChatSendOptions = {}): Promise<ChatMessage> {
+    return this.send_(opts.as, 'chat.send', 'POST', `${this.conv(conversationId)}/messages`, {
+      type: 'text',
+      text,
+      ...(opts.replyToId ? { replyToId: opts.replyToId } : {}),
+      clientMessageId: opts.clientMessageId ?? defaultIdempotencyKey(),
+    });
+  }
+
+  /** POST `/chat/conversations/:id/messages`: send a game-defined card (`customType` from the config). */
+  async sendCustom(
+    conversationId: string,
+    customType: string,
+    payload: unknown,
+    opts: ChatSendOptions & { text?: string } = {},
+  ): Promise<ChatMessage> {
+    return this.send_(opts.as, 'chat.sendCustom', 'POST', `${this.conv(conversationId)}/messages`, {
+      type: 'custom',
+      customType,
+      payload,
+      ...(opts.text !== undefined ? { text: opts.text } : {}),
+      ...(opts.replyToId ? { replyToId: opts.replyToId } : {}),
+      clientMessageId: opts.clientMessageId ?? defaultIdempotencyKey(),
+    });
+  }
+
+  /**
+   * PATCH `/chat/conversations/:id/messages/:messageId`: edit your own
+   * message within the game's edit window (`config().messages.editWindowSeconds`).
+   */
+  async editMessage(conversationId: string, messageId: string, text: string, opts: { as?: string } = {}): Promise<ChatMessage> {
+    return this.send_(
+      opts.as,
+      'chat.editMessage',
+      'PATCH',
+      `${this.conv(conversationId)}/messages/${encodeURIComponent(messageId)}`,
+      { text },
+    );
+  }
+
+  /** DELETE `/chat/conversations/:id/messages/:messageId`: your own, or any as a group admin / guild officer. */
+  async deleteMessage(
+    conversationId: string,
+    messageId: string,
+    opts: { as?: string } = {},
+  ): Promise<{ messageId: string; deleted: boolean }> {
+    return this.send_(
+      opts.as,
+      'chat.deleteMessage',
+      'DELETE',
+      `${this.conv(conversationId)}/messages/${encodeURIComponent(messageId)}`,
+    );
+  }
+
+  /** POST `/chat/conversations/:id/read`: mark read up to `seq` (never backwards). */
+  async markRead(conversationId: string, seq: number, opts: { as?: string } = {}): Promise<{ lastReadSeq: number }> {
+    return this.send_(opts.as, 'chat.markRead', 'POST', `${this.conv(conversationId)}/read`, { seq });
+  }
+
+  /** POST `/chat/conversations/:id/typing`: "is typing…" (throttled server-side, never stored). */
+  async typing(conversationId: string, opts: { as?: string } = {}): Promise<void> {
+    await this.send_(opts.as, 'chat.typing', 'POST', `${this.conv(conversationId)}/typing`, {});
+  }
+
+  /** PUT `/chat/conversations/:id/settings`: mute notifications until a time, or hide a direct conversation. */
+  async setConversationSettings(
+    conversationId: string,
+    patch: { mutedUntil?: string | null; hidden?: boolean },
+    opts: { as?: string } = {},
+  ): Promise<ChatConversation> {
+    return this.send_(opts.as, 'chat.setConversationSettings', 'PUT', `${this.conv(conversationId)}/settings`, patch);
+  }
+
+  /**
+   * GET `/chat/stream`: every inbox conversation live, plus the named public
+   * channels (at most 10). Does NOT auto-reconnect: re-open after a backoff
+   * and catch up with `messages(id, { after })`.
+   */
+  async live(opts: { channels?: string[]; as?: string } = {}): Promise<ChatStream> {
+    const externalPlayerId = await resolvePlayerId(this.client, opts.as, 'chat.live');
+    return openChatStream({
+      fetchImpl: this.client.fetchForStreaming,
+      baseUrl: this.client.baseUrl,
+      externalPlayerId,
+      authHeader: this.client.authHeader,
+      playerSecret: this.client.playerSecret,
+      sdkUserAgent: this.client.sdkUserAgent,
+      channels: opts.channels ?? [],
+      filter: this.client.chatFilter,
+    });
+  }
+
+  /** Callback form of {@link ChatClient.live}. Returns a stop function. */
+  async watch(
+    handler: (event: ChatStreamEvent) => void,
+    opts: { channels?: string[]; onError?: (err: unknown) => void; as?: string } = {},
+  ): Promise<() => Promise<void>> {
+    const stream = await this.live({
+      ...(opts.channels ? { channels: opts.channels } : {}),
+      ...(opts.as ? { as: opts.as } : {}),
+    });
+    void (async () => {
+      try {
+        for await (const ev of stream.events) handler(ev);
+      } catch (err) {
+        opts.onError?.(err);
+      }
+    })();
+    return () => stream.close();
+  }
+}
+
+/**
+ * `kraty.moderation`: reporting players and the player's own standing.
+ * Works in every game, with or without chat: the in-app "report player"
+ * the app stores require for user-generated content. Blocking lives on
+ * `kraty.friends.block`.
+ */
+export class ModerationClient {
+  constructor(private readonly client: KratyClient) {}
+
+  private async base(as: string | undefined, op: string): Promise<string> {
+    const externalPlayerId = await resolvePlayerId(this.client, as, op);
+    return `/sdk/v1/players/${encodeURIComponent(externalPlayerId)}`;
+  }
+
+  /** POST `/reports`: report another player (optionally with the messages in question). */
+  async report(input: ReportInput, opts: { as?: string } = {}): Promise<MyReport> {
+    const base = await this.base(opts.as, 'moderation.report');
+    return (await this.client.request<DataEnvelope<MyReport>>('POST', `${base}/reports`, input)).data;
+  }
+
+  /** GET `/reports`: the reports this player filed and their status. */
+  async reports(opts: { limit?: number; as?: string } = {}): Promise<MyReport[]> {
+    const base = await this.base(opts.as, 'moderation.reports');
+    const qs = opts.limit !== undefined ? `?limit=${opts.limit}` : '';
+    return (await this.client.request<DataEnvelope<{ reports: MyReport[] }>>('GET', `${base}/reports${qs}`)).data.reports;
+  }
+
+  /** GET `/moderation/status`: mutes, chat bans and unacknowledged warnings in force. */
+  async status(opts: { as?: string } = {}): Promise<ModerationStatus> {
+    const base = await this.base(opts.as, 'moderation.status');
+    return (await this.client.request<DataEnvelope<ModerationStatus>>('GET', `${base}/moderation/status`)).data;
+  }
+
+  /** POST `/moderation/warnings/:id/acknowledge`: the player saw the warning. */
+  async acknowledgeWarning(restrictionId: string, opts: { as?: string } = {}): Promise<Restriction> {
+    const base = await this.base(opts.as, 'moderation.acknowledgeWarning');
+    return (
+      await this.client.request<DataEnvelope<Restriction>>(
+        'POST',
+        `${base}/moderation/warnings/${encodeURIComponent(restrictionId)}/acknowledge`,
+      )
+    ).data;
+  }
+}

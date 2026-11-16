@@ -40,6 +40,24 @@ export type KratyErrorCode =
   | 'insufficient_entry_cost'
   // ── matchmaking ────────────────────────────────────────────────
   | 'lobby_forming'
+  // ── co-op team events ──────────────────────────────────────────
+  | 'window_ended'
+  | 'window_busy'
+  | 'wrong_board_kind'
+  | 'missing_team_attribute'
+  | 'team_required'
+  | 'not_team_member'
+  | 'team_not_active'
+  | 'team_full'
+  | 'late_join_next_window'
+  | 'team_formation_mismatch'
+  | 'partner_limit_reached'
+  | 'already_partners'
+  | 'cannot_partner_self'
+  | 'random_partner_disabled'
+  | 'invite_expired'
+  | 'player_blocked'
+  | 'friend_code_invalid'
   // ── inventory ──────────────────────────────────────────────────
   | 'inventory_not_permissive';
 

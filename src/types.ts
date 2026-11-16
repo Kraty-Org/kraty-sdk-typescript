@@ -26,6 +26,8 @@ export interface StartAttemptResponse {
   attempt: Attempt;
   leaderboardId: string;
   windowEndsAt: string;
+  /** Team events only: the player's team seats in this window. */
+  teams?: TeamSeatView[];
 }
 
 export interface ProgressInput {
@@ -37,6 +39,12 @@ export interface ProgressInput {
   occurredAt?: string;
   /** SDK auto-generates one if omitted. */
   idempotencyKey?: string;
+  /**
+   * Team events: which of the player's teams this progress counts for.
+   * Needed only when the player holds several team seats and the event
+   * routes contributions to a chosen team (partner bars).
+   */
+  eventTeamId?: string;
 }
 
 export interface LeaderboardEntry {
@@ -78,6 +86,19 @@ export interface LeaderboardEntry {
    * resource the player never earned reads `0`. Never present on bot rows.
    */
   progression?: Record<string, number>;
+  /**
+   * Team boards only (`participantScope: 'team'`): the event team this row
+   * stands for; `null` on rival bot teams. Team rows keep `kind: 'player'`,
+   * so a UI that ignores this field still renders them as ordinary rows.
+   */
+  team?: LeaderboardEntryTeam | null;
+}
+
+/** The team behind a row of a team board. */
+export interface LeaderboardEntryTeam {
+  eventTeamId: string;
+  badge: string | null;
+  memberCount: number;
 }
 
 /**
@@ -116,6 +137,11 @@ export interface ProgressionLimits {
 export interface EventLeaderboard {
   leaderboardId: string;
   mode: string;
+  /**
+   * `'team'` on a co-op team board: entries are teams (and rival bot
+   * teams) and `self` is your team. `'player'` otherwise.
+   */
+  participantScope?: 'player' | 'team';
   finalized: boolean;
   entries: LeaderboardEntry[];
   self: { rank: number; score: number } | null;
@@ -237,6 +263,21 @@ export interface LeaderboardScoreResult {
   rank: number | null;
 }
 
+/** One entry of {@link LeaderboardsClient.list}: a board the game can show. */
+export interface LeaderboardSummary {
+  key: string;
+  /** LocalizedString: a plain string or a locale map. */
+  name: unknown;
+  description: string | null;
+  resetCadence: 'never' | 'weekly' | 'monthly' | string;
+  /** ISO time the current period ends; null when the board never resets. */
+  nextResetAt: string | null;
+  /** False when only the studio's server may submit scores to this board. */
+  acceptClientScores: boolean;
+  /** playerContext fields that segment the board; pass one as `segment`. */
+  contextSegments: string[];
+}
+
 export interface LeaderboardReadOptions {
   /** Progression economy keys to attach to each player entry (max 8). */
   progression?: string[];
@@ -336,6 +377,8 @@ export interface ProgressResponse {
   /** Empty when nothing fired this update, never null, so callers can
    *  iterate without a null check. */
   milestonesFired: MilestoneFired[];
+  /** Team events only: the player's team seats after this write. */
+  teams?: TeamSeatView[];
 }
 
 /** Result of `events.finish()`: the finalized attempt + how it resolved. */
@@ -347,6 +390,8 @@ export interface FinishAttemptResponse {
    * its target (participation only, same as a timeout).
    */
   outcome: 'completed' | 'expired';
+  /** Team events only: the player's team seats after the finish. */
+  teams?: TeamSeatView[];
 }
 
 /**
@@ -511,6 +556,63 @@ export interface EventListing {
    * it (all-null maxima when the event caps nothing).
    */
   attemptQuota?: AttemptQuota;
+
+  /**
+   * Score that ends a `first_to_score` session: the race's finish line.
+   * Draw progress toward it; null when the event has no such target.
+   */
+  goal?: number | null;
+
+  /**
+   * Condition that gates the event's visibility (`entryRequirement` gates
+   * joining). The server enforces it on `events.start`; surfaced so the UI
+   * can show why an event is locked. Null when there's no gate.
+   */
+  unlockCondition?: Record<string, unknown> | null;
+
+  /**
+   * Length of one attempt in seconds. It's also cut short by the window
+   * end (`endsAt`) and, for session events, by the session ending.
+   */
+  attemptDurationSeconds?: number;
+
+  /**
+   * Team events only: the player's team seats in this window (score, goal,
+   * milestones, your contribution and rank). Absent for non-team events.
+   */
+  teams?: TeamSeatView[];
+
+  /**
+   * Team events only: how teams form, i.e. what your UI does before the
+   * player can score for a team. `'external'` (your server posts rosters)
+   * and `'attribute'` (e.g. country) need nothing; `'auto_match'`: offer
+   * "Find a team" (`events.matchTeam`, or just `start`); `'partner_slots'`:
+   * partner invites / `events.randomPartner`, then pass `eventTeamId` on
+   * progress. Absent for non-team events.
+   */
+  teamFormation?: string;
+
+  /**
+   * Team events only: the formation's player-facing options, so your UI can
+   * offer the right setup before the player has a team (e.g. hide "random
+   * partner" when `allowRandom` is false, stop inviting at `maxPartners`,
+   * know which `playerContext` keys pick a country team).
+   */
+  teamOptions?: TeamClientOptions;
+}
+
+/** `EventListing.teamOptions`: what a client needs to get a player onto a team. */
+export interface TeamClientOptions {
+  /** Most members a team holds. */
+  maxMembers: number;
+  /** `auto_match`: players per matched team (2 on partner events); null otherwise. */
+  teamSize: number | null;
+  /** `partner_slots`: partner bars a player may hold; null otherwise. */
+  maxPartners: number | null;
+  /** `partner_slots`: whether `randomPartner` is offered; null otherwise. */
+  allowRandom: boolean | null;
+  /** `attribute`: the `playerContext` keys the team is keyed by. The server-resolved `country` is never listed. */
+  contextKeys: string[];
 }
 
 /**
@@ -544,6 +646,18 @@ export interface CatalogCurrency {
   /** LocalizedString. */
   description: unknown | null;
   kind: 'currency' | 'progression' | string;
+  /**
+   * A derived progression item's curve (a `level` from `xp`): each level and
+   * the source balance that reaches it, lowest first. Null / absent for
+   * everything else. Draw "120 / 200 XP" from it without hardcoding levels.
+   */
+  derived?: CatalogDerivedProgression | null;
+}
+
+export interface CatalogDerivedProgression {
+  /** The item this one follows, e.g. `xp`. */
+  sourceKey: string;
+  levels: Array<{ level: number; sourceRequired: number }>;
 }
 
 export interface Catalog {
@@ -654,6 +768,38 @@ export interface PlayerItemHolding {
   metadata: Record<string, unknown>;
   createdAt: string;
   updatedAt: string;
+}
+
+/**
+ * The game's daily login calendar as the player sees it
+ * (`GET /sdk/v1/players/:p/daily-login`). Rewards are paid by the server
+ * on the player's first session of each UTC day, as a grant with
+ * `sourceKind: 'daily_login'`; this is what a client reads to draw the
+ * calendar.
+ */
+export interface DailyLogin {
+  /** Day 1 first; each day's reward entries as configured in the dashboard. */
+  days: DailyLoginDay[];
+  /** What a streak longer than the calendar does: start over, keep paying the last day, or stop. */
+  afterLastDay: 'restart' | 'hold_last' | 'stop';
+  /** Progression item holding `currentDay`, for clients already reading the wallet. */
+  itemKey: string;
+  /** Consecutive UTC days with a session; 0 once a day was missed. */
+  loginStreak: number;
+  /** Calendar day the player is on (1..days.length); 0 without a streak. */
+  currentDay: number;
+  /** Whether today's reward has been granted already. */
+  paidToday: boolean;
+  /** The grant that paid today, to match against the grant list or inventory stream. */
+  todayGrantId: string | null;
+  /** ISO start of the next UTC day: when the next day's reward can be earned. */
+  nextDayAt: string;
+}
+
+export interface DailyLoginDay {
+  day: number;
+  /** Reward entries, e.g. `{ type: 'currency', currencyKey: 'gems', amount: 10 }`. */
+  entries: Array<Record<string, unknown>>;
 }
 
 /**
@@ -1006,4 +1152,554 @@ export interface SendGiftInput {
   /** Replay guard: a retry with the same key returns the original gift
    *  rather than tripping the cooldown. */
   idempotencyKey?: string;
+}
+
+// ─── Co-op & team events ───────────────────────────────────────────
+
+/**
+ * One of the player's team seats in an event window. Team events return it
+ * on `events.listForPlayer`, `events.start`, `events.progress` and
+ * `events.finish` (`teams`), so a team UI (score, goal bar or boss HP,
+ * milestone chips, your contribution and rank) needs no extra call.
+ */
+export interface TeamSeatView {
+  eventTeamId: string;
+  teamKey: string;
+  displayName: string;
+  badge: string | null;
+  formation: string;
+  /** `'forming'` (partner invite pending) | `'active'` | `'closed'`. */
+  status: 'forming' | 'active' | 'closed';
+  score: number;
+  memberCount: number;
+  /** Null when the event has no team goal. `remaining` is the boss HP. */
+  goal: { target: number; remaining: number; completed: boolean } | null;
+  milestones: TeamSeatMilestone[];
+  seat: TeamSeatState;
+  /** The team board, once the team entered one. */
+  leaderboardId: string | null;
+  /** Your team's place on that board: live during the window, final after close. Null without a board. */
+  boardRank: number | null;
+  /**
+   * Partner events: your roll-up bar over all your pairs (the same on each
+   * of your seats) and its checkpoints. Null (or absent) without one.
+   */
+  rollup?: TeamRollup | null;
+}
+
+/** A partner event's per-player roll-up bar (e.g. Train Journey rails 3/6/9). */
+export interface TeamRollup {
+  value: number;
+  milestones: Array<{ key: string; threshold: number; reached: boolean; paid: boolean }>;
+}
+
+/** `events.matchTeam`: your auto-matched team. */
+export interface TeamMatchResult {
+  windowId: string;
+  eventTeamId: string;
+  /** A new team was opened for you (false: you joined one, or already had one). */
+  created: boolean;
+  teams: TeamSeatView[];
+}
+
+/** A player on a partner invite or suggestion. */
+export interface PartnerPlayer {
+  externalPlayerId: string;
+  displayIdentity: PlayerIdentity | null;
+}
+
+/** A partner invite (its id is the pair's `eventTeamId`). */
+export interface PartnerInvite {
+  eventTeamId: string;
+  status: 'pending' | 'accepted' | 'declined' | 'cancelled';
+  from: PartnerPlayer;
+  to: PartnerPlayer;
+  /** When a pending invite expires (ISO). */
+  expiresAt: string | null;
+  createdAt: string;
+}
+
+/** `events.randomPartner`: paired with someone waiting, or your bar waits for a partner. */
+export interface RandomPartnerResult {
+  status: 'paired' | 'waiting';
+  eventTeamId: string;
+  teams: TeamSeatView[];
+}
+
+/** `events.partnerSuggestions`: someone you could invite. */
+export interface PartnerSuggestion {
+  externalPlayerId: string;
+  displayIdentity: PlayerIdentity | null;
+  /** An accepted friend (friends are listed first). */
+  isFriend: boolean;
+}
+
+/** One team milestone as one member sees it. */
+export interface TeamSeatMilestone {
+  key: string;
+  /** After goal scaling. */
+  threshold: number;
+  unlocked: boolean;
+  /** You were paid this tier. */
+  paid: boolean;
+  /** Unlocked while you were on the team; pays once your own contribution reaches the minimum. */
+  pendingMinContribution: boolean;
+}
+
+/** Your seat on the team. */
+export interface TeamSeatState {
+  seatId: string;
+  status: 'invited' | 'active' | 'left' | 'removed';
+  contribution: number;
+  /** Your 1-based rank inside the team. */
+  rank: number;
+  locked: boolean;
+}
+
+/** One teammate, as `events.teamMembers` returns them. */
+export interface EventTeamMember {
+  externalPlayerId: string | null;
+  name: string | null;
+  avatar: string | null;
+  contribution: number;
+  /** 1-based rank inside the team. */
+  rank: number;
+  status: 'invited' | 'active' | 'left' | 'removed';
+  isSelf: boolean;
+}
+
+export interface EventTeamMembersPage {
+  eventTeamId: string;
+  teamKey: string;
+  memberCount: number;
+  members: EventTeamMember[];
+  /** Pass back as `cursor` for the next page; null on the last page. */
+  nextCursor: string | null;
+}
+
+// ── Guilds (docs/25) ───────────────────────────────────────────────────
+
+/** The three fixed guild roles, highest first. */
+export type GuildRole = 'leader' | 'co_leader' | 'member';
+
+/** `open`: anyone eligible joins instantly. `request`: an officer approves. */
+export type GuildJoinType = 'open' | 'request';
+
+/** What a role may do; the game config decides for co-leaders and members. */
+export type GuildPermission = 'accept_requests' | 'kick' | 'promote' | 'demote' | 'edit_profile';
+
+/** Another player as guild screens show them. */
+export interface GuildPlayerRef {
+  externalPlayerId: string;
+  displayIdentity: PlayerIdentity | null;
+}
+
+/** A guild card: search results, recommendations, profile headers. */
+export interface GuildSummary {
+  guildId: string;
+  name: string;
+  description: string | null;
+  /** Free-form key your game maps to emblem art. */
+  badge: string | null;
+  /** ISO-3166-1 alpha-2 country code (`PT`, `US`), or null. */
+  country: string | null;
+  joinType: GuildJoinType;
+  memberCount: number;
+  /** The fixed Kraty limit (50). */
+  maxMembers: number;
+  metadata: Record<string, unknown>;
+  leader: GuildPlayerRef | null;
+  createdAt: string;
+}
+
+/** One member of a guild roster. */
+export interface GuildMember {
+  externalPlayerId: string;
+  displayIdentity: PlayerIdentity | null;
+  role: GuildRole;
+  joinedAt: string;
+  /** Last time the platform saw the player; officers judge activity by it. */
+  lastSeenAt: string | null;
+  online: boolean;
+  /** Donations this member made in this guild this week. */
+  weeklyHelps: number;
+}
+
+/** A guild with its roster (leader first, then co-leaders, members; longest-serving first). */
+export interface GuildDetail {
+  guildId: string;
+  name: string;
+  description: string | null;
+  badge: string | null;
+  country: string | null;
+  joinType: GuildJoinType;
+  memberCount: number;
+  maxMembers: number;
+  metadata: Record<string, unknown>;
+  leader: GuildPlayerRef | null;
+  createdAt: string;
+  members: GuildMember[];
+}
+
+/** The player's guild, their role and permissions. */
+export interface MyGuild {
+  guild: GuildDetail;
+  membership: { role: GuildRole; joinedAt: string; permissions: GuildPermission[] };
+}
+
+/** A recommended guild: a summary plus how many of your friends are in it. */
+export interface RecommendedGuild {
+  guildId: string;
+  name: string;
+  description: string | null;
+  badge: string | null;
+  country: string | null;
+  joinType: GuildJoinType;
+  memberCount: number;
+  maxMembers: number;
+  metadata: Record<string, unknown>;
+  leader: GuildPlayerRef | null;
+  createdAt: string;
+  friendCount: number;
+}
+
+/** The unlock gate as it applies to this player. */
+export interface GuildUnlockStatus {
+  /** False until the studio picks an item: then there is no gate. */
+  active: boolean;
+  itemKey: string | null;
+  threshold: number;
+  /** Your balance of the item (null while the gate is inactive). */
+  balance: number | null;
+  eligible: boolean;
+}
+
+/** Help-request settings. */
+export interface GuildHelpSettings {
+  enabled: boolean;
+  resources: Array<{ type: 'item' | 'currency'; key: string; maxPerRequest: number; costsDonor: boolean }>;
+  requestCooldownSeconds: number;
+  requestTtlHours: number;
+  perDonationMax: number;
+  /** Donations per player per guild week (the weekly helps counter); null = unlimited. */
+  weeklyDonationLimit: number | null;
+  donorReward: Array<Record<string, unknown>>;
+}
+
+/** When the guild week rolls over; the weekly donation cap counts over it. */
+export interface GuildWeekSchedule {
+  /** 0 = Sunday … 6 = Saturday. */
+  dayOfWeek: number;
+  hour: number;
+  minute: number;
+  timezone: string;
+  currentStart: string;
+  currentEnd: string;
+}
+
+/** The game's guild rules as this player sees them: build guild screens from it. */
+export interface GuildClientConfig {
+  enabled: true;
+  maxMembers: number;
+  defaultJoinType: GuildJoinType;
+  roles: { leader: GuildPermission[]; coLeader: GuildPermission[]; member: GuildPermission[] };
+  unlock: GuildUnlockStatus;
+  createCost: Array<{ type: 'item' | 'currency'; key: string; amount: number }>;
+  /**
+   * Who takes `createCost` and donor-paid help (`help.resources[].costsDonor`)
+   * from the player. `platform`: Kraty debits it when the guild is founded or
+   * the donation is made. `studio`: your game manages inventory itself, so
+   * Kraty charges nothing; charge the player yourself (before the call, or
+   * from your backend on the `guild.created` / `guild.help_donated` webhooks).
+   */
+  costsChargedBy: 'platform' | 'studio';
+  leaveCooldownHours: number;
+  kickRejoinBlockHours: number;
+  /** A request nobody answers expires `ttlHours` after its `createdAt`. */
+  joinRequests: { declinedRetryHours: number; maxPendingPerPlayer: number; ttlHours: number };
+  help: GuildHelpSettings;
+  week: GuildWeekSchedule;
+}
+
+/** A request to join a `request`-type guild. */
+export interface GuildJoinRequest {
+  requestId: string;
+  guild: { guildId: string; name: string; badge: string | null };
+  /** The player asking. */
+  player: GuildPlayerRef | null;
+  message: string | null;
+  status: 'pending' | 'accepted' | 'declined' | 'cancelled' | 'expired';
+  createdAt: string;
+  decidedAt: string | null;
+}
+
+/** A page of `guilds.searchPage` results. */
+export interface GuildSearchPage {
+  guilds: GuildSummary[];
+  /** Pass as `offset` for the next page; null on the last page. */
+  nextOffset: number | null;
+}
+
+/** `join` outcome: joined an open guild, or a request is waiting on a request guild. */
+export interface GuildJoinResult {
+  status: 'joined' | 'requested';
+  guild?: MyGuild;
+  request?: GuildJoinRequest;
+}
+
+export interface GuildLeaveResult {
+  guildId: string;
+  /** You were the last member: the guild is gone. */
+  disbanded: boolean;
+  /** Who leads now, when you were the leader. */
+  newLeader: GuildPlayerRef | null;
+}
+
+export interface CreateGuildInput {
+  name: string;
+  description?: string | null;
+  badge?: string | null;
+  country?: string | null;
+  joinType?: GuildJoinType;
+  metadata?: Record<string, unknown>;
+}
+
+export type GuildProfilePatch = Partial<CreateGuildInput>;
+
+export interface GuildHelpRequest {
+  requestId: string;
+  requester: GuildPlayerRef | null;
+  type: 'item' | 'currency';
+  resourceKey: string;
+  amountRequested: number;
+  amountReceived: number;
+  /** `open` past its `expiresAt` reads as `expired`. */
+  status: 'open' | 'filled' | 'cancelled' | 'expired';
+  createdAt: string;
+  expiresAt: string;
+  donatedByMe: boolean;
+}
+
+export interface GuildHelpOverview {
+  requests: GuildHelpRequest[];
+  myRequest: GuildHelpRequest | null;
+  /** When you may ask again (null = now). */
+  nextRequestAt: string | null;
+  /** The weekly helps counter. */
+  week: { start: string; end: string; donationsMade: number; donationLimit: number | null };
+}
+
+export interface GuildHelpDonation {
+  donationId: string;
+  requestId: string;
+  amount: number;
+  /** Grant delivering the donation to the requester. */
+  grantId: string;
+  /** Your reward grant, when the game pays one. */
+  rewardGrantId: string | null;
+  request: GuildHelpRequest;
+  week: { donationsMade: number; donationLimit: number | null };
+}
+
+// ── Chat (docs: chat.mdx) ──────────────────────────────────────────────
+
+/** How the profanity filter treats a conversation kind. */
+export type ChatProfanityMode = 'always' | 'on_by_default' | 'off_by_default';
+
+/** A player as chat shows them. */
+export interface ChatPlayerRef {
+  externalPlayerId: string;
+  displayIdentity: { name: string; avatar?: string | null; country?: string | null } | null;
+}
+
+/** A message, resolved for the player reading it. */
+export interface ChatMessage {
+  messageId: string;
+  conversationId: string;
+  /** Gapless, ascending per conversation: the `before` / `after` cursor. */
+  seq: number;
+  /** `text`, `custom` (a game card) or `system` (written by Kraty). */
+  type: 'text' | 'custom' | 'system';
+  sender: { kind: 'player' | 'server' | 'system'; player: ChatPlayerRef | null };
+  /** What this player sees: the filtered copy when their filter applies; null when deleted. */
+  text: string | null;
+  /** `text` is the masked copy. */
+  filtered: boolean;
+  /** `custom`: the card type. `system`: the event (`member_joined`, `gift_sent`, …). */
+  customType: string | null;
+  payload: unknown;
+  replyToId: string | null;
+  /** Echoed to the sender only. */
+  clientMessageId: string | null;
+  createdAt: string;
+  /** When the sender last edited it; null = never. */
+  editedAt: string | null;
+  deleted: boolean;
+}
+
+/** A public channel the studio defined. */
+export interface ChatChannel {
+  key: string;
+  name: string;
+  description: string | null;
+  /** `server_only`: announcements; players read but can't post. */
+  postPolicy: 'players' | 'server_only';
+  slowModeSeconds: number;
+  /** Who may post (reading is open). */
+  requirement: { itemKey: string; threshold: number } | null;
+  metadata: Record<string, unknown>;
+}
+
+/** A conversation as the player sees it. */
+export interface ChatConversation {
+  conversationId: string;
+  /** `direct`, `group`, `guild`, `channel` (open set). */
+  kind: string;
+  /** Group title, guild or channel name; null for direct (show `peer`). */
+  title: string | null;
+  metadata: Record<string, unknown>;
+  memberCount: number;
+  lastSeq: number;
+  lastMessageAt: string | null;
+  lastMessage: ChatMessage | null;
+  unreadCount: number;
+  lastReadSeq: number;
+  /** Notifications muted by the player until then. */
+  mutedUntil: string | null;
+  peer: (ChatPlayerRef & { online: boolean }) | null;
+  guildId: string | null;
+  channel: ChatChannel | null;
+  /** The player's role here (group / guild role). */
+  role: string | null;
+  canPost: boolean;
+  /** Why the player can't post (blocked, friends only, requirement, announcements…). */
+  postDenied: { code: string; message: string; details?: Record<string, unknown> } | null;
+  /** May delete other players' messages here. */
+  canModerate: boolean;
+  filterMode: ChatProfanityMode;
+  createdAt: string;
+}
+
+export interface ChatMember {
+  externalPlayerId: string;
+  displayIdentity: ChatPlayerRef['displayIdentity'];
+  role: string;
+  joinedAt: string;
+  online: boolean;
+}
+
+/** A conversation with its roster (direct and group; null for guild chat and channels). */
+export type ChatConversationDetail = ChatConversation & ChatConversationMembers;
+
+export interface ChatConversationMembers {
+  members: ChatMember[] | null;
+}
+
+export interface ChatPreferences {
+  /** null = each conversation kind's default. */
+  profanityFilter: boolean | null;
+  allowDirectFrom: 'everyone' | 'friends' | 'nobody';
+}
+
+/** A warning, chat mute or chat ban on the player. */
+export interface Restriction {
+  restrictionId: string;
+  kind: 'warning' | 'chat_mute' | 'chat_ban';
+  /** Show this to the player. */
+  reason: string | null;
+  source: 'moderator' | 'auto' | 'server';
+  createdAt: string;
+  expiresAt: string | null;
+  liftedAt: string | null;
+  acknowledgedAt: string | null;
+  active: boolean;
+  reportId: string | null;
+}
+
+/** The player's moderation standing. */
+export interface ModerationStatus {
+  canChat: boolean;
+  canPost: boolean;
+  mutedUntil: string | null;
+  chatBannedUntil: string | null;
+  restrictions: Restriction[];
+}
+
+/** The game's chat rules, as this player sees them. */
+export interface ChatClientConfig {
+  kinds: Record<string, { enabled: boolean; profanityFilter: string } & Record<string, unknown>>;
+  channels: Array<ChatChannel & { profanityFilter: string }>;
+  messages: ChatMessageRules;
+  rateLimit: { messagesPerMinute: number };
+  preferences: ChatPreferences;
+  status: ModerationStatus;
+}
+
+/** Message limits and the game's custom card types. */
+export interface ChatMessageRules {
+  maxLength: number;
+  allowLinks: boolean;
+  customTypes: ChatCustomType[];
+  /** Seconds after sending a player may edit; 0 = editing off. */
+  editWindowSeconds: number;
+}
+
+export interface ChatCustomType {
+  key: string;
+  description: string | null;
+  maxPayloadBytes: number;
+  /** JSON Schema the payload must match, or null. */
+  schema: unknown;
+}
+
+export interface ChatConversationPage {
+  conversations: ChatConversation[];
+  nextOffset: number | null;
+}
+
+export interface ChatMessagePage {
+  /** Oldest to newest. */
+  messages: ChatMessage[];
+  hasMore: boolean;
+}
+
+export interface ChatUnread {
+  total: number;
+  conversations: number;
+  byKind: Record<string, number>;
+}
+
+export type ReportCategory =
+  | 'spam'
+  | 'harassment'
+  | 'hate_speech'
+  | 'sexual_content'
+  | 'violence'
+  | 'self_harm'
+  | 'cheating'
+  | 'impersonation'
+  | 'inappropriate_name'
+  | 'other';
+
+export interface ReportInput {
+  targetExternalPlayerId: string;
+  category: ReportCategory;
+  context?: 'chat' | 'profile' | 'guild' | 'gameplay' | 'other';
+  comment?: string | null;
+  /** With `messageIds`: the conversation the reported messages are in. */
+  conversationId?: string;
+  messageIds?: string[];
+  guildId?: string;
+}
+
+/** A report the player filed. */
+export interface MyReport {
+  reportId: string;
+  targetExternalPlayerId: string;
+  category: string;
+  context: string;
+  status: 'open' | 'resolved' | 'dismissed';
+  createdAt: string;
+  updatedAt: string;
+  resolvedAt: string | null;
 }

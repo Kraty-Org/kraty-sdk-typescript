@@ -117,6 +117,14 @@ export interface KratyClientOptions {
    * universal way to read it, so pass it from your build config.
    */
   appVersion?: string;
+  /**
+   * Chat (docs: chat.mdx). `profanityFilter` is THIS player's choice for the
+   * profanity filter, sent as `X-Kraty-Chat-Filter: on | off` with every
+   * request (and `?filter=` on the chat stream). Leave it unset to follow the
+   * player's saved preference (`chat.setPreferences`), then each conversation
+   * kind's default. Kinds the game set to `always` filter regardless.
+   */
+  chat?: { profanityFilter?: boolean };
 }
 
 export interface RetryConfig {
@@ -231,6 +239,8 @@ export class KratyClient {
   // Device telemetry headers (see KratyClientOptions.platform / appVersion).
   private readonly _platform: string | null;
   private readonly _appVersion: string | null;
+  // Chat profanity-filter choice (KratyClientOptions.chat), 'on' | 'off' | null.
+  private _chatFilter: 'on' | 'off' | null;
   // Inflight register dedupe: concurrent first-touch calls on a
   // freshly-constructed client share the same registration so we
   // don't fire two POST /register against the server.
@@ -264,6 +274,8 @@ export class KratyClient {
     if (opts.onRequest) this.onRequest = opts.onRequest;
     this._platform = normalizePlatform(opts.platform) ?? detectPlatform();
     this._appVersion = opts.appVersion?.trim() || null;
+    this._chatFilter =
+      opts.chat?.profanityFilter === undefined ? null : opts.chat.profanityFilter ? 'on' : 'off';
     this._finalization = new FinalizationTracker({
       store: opts.membershipStore ?? defaultMembershipStore(),
       // Never force-register during catch-up: only the current active player.
@@ -429,6 +441,12 @@ export class KratyClient {
   get fetchForStreaming(): typeof fetch { return this.fetchImpl; }
   /** @internal */
   get sdkUserAgent(): string { return SDK_USER_AGENT; }
+  /** The chat profanity-filter choice (`on` / `off`), or null when unset. */
+  get chatFilter(): 'on' | 'off' | null { return this._chatFilter; }
+  /** Change the player's chat filter choice at runtime (a settings toggle); null = unset. */
+  setChatFilter(on: boolean | null): void {
+    this._chatFilter = on === null ? null : on ? 'on' : 'off';
+  }
   /** @internal */
   get secretStore(): SecretStore { return this._secretStore; }
 
@@ -630,6 +648,7 @@ export class KratyClient {
           'x-kraty-sdk': SDK_USER_AGENT,
           ...(this._platform ? { 'x-kraty-platform': this._platform } : {}),
           ...(this._appVersion ? { 'x-kraty-app-version': this._appVersion } : {}),
+          ...(this._chatFilter ? { 'x-kraty-chat-filter': this._chatFilter } : {}),
           ...(this._playerSecret ? { 'x-player-secret': this._playerSecret } : {}),
           ...(body !== undefined ? { 'content-type': 'application/json' } : {}),
         },
@@ -686,7 +705,7 @@ function stripTrailingSlash(s: string): string {
   return s.endsWith('/') ? s.slice(0, -1) : s;
 }
 
-function defaultIdempotencyKey(): string {
+export function defaultIdempotencyKey(): string {
   // `crypto.randomUUID` is available on Node 18+ and every modern
   // browser / runtime that ships the WebCrypto API. Cast through
   // `globalThis` so the SDK doesn't carry a Node typings dependency.

@@ -41,6 +41,18 @@ static connectAsPlayer(opts: KratyClientOptions, externalPlayerId: string | null
 listForPlayer(opts?: { as?: string }): Promise<EventListing[]>
 start(eventKey: string, playerContext?: PlayerContext, opts?: { idempotencyKey?: string; as?: string }): Promise<StartAttemptResponse>
 progress(eventKey: string, attemptId: string, input: ProgressInput, opts?: { as?: string }): Promise<ProgressResponse>
+
+// Co-op team events (listing / start / progress / finish also carry `teams`; the listing carries `teamFormation` and `teamOptions`;
+// ProgressInput.eventTeamId names a partner bar)
+teamMembers(eventTeamId: string, opts?: { cursor?: string; limit?: number; as?: string }): Promise<EventTeamMembersPage>
+matchTeam(eventKey: string, opts?: { idempotencyKey?: string; as?: string }): Promise<TeamMatchResult>
+invitePartner(eventKey: string, target: { externalPlayerId: string } | { friendCode: string }, opts?): Promise<PartnerInvite>
+partnerInvites(eventKey: string, opts?: { direction?: 'in' | 'out'; as?: string }): Promise<PartnerInvite[]>
+acceptInvite(eventKey: string, eventTeamId: string, opts?): Promise<PartnerInvite & { teams: TeamSeatView[] }>
+declineInvite(eventKey: string, eventTeamId: string, opts?): Promise<PartnerInvite>
+cancelInvite(eventKey: string, eventTeamId: string, opts?): Promise<PartnerInvite>
+randomPartner(eventKey: string, opts?): Promise<RandomPartnerResult>
+partnerSuggestions(eventKey: string, opts?: { limit?: number; as?: string }): Promise<PartnerSuggestion[]>
 ```
 
 ## `kraty.leaderboards`: `LeaderboardsClient`
@@ -156,6 +168,48 @@ list(opts?: { as?: string }): Promise<PlayerWalletHolding[]>
 debit(economyKey: string, input: DebitWalletInput, opts?: { as?: string }): Promise<DebitWalletResult>
 ```
 
+## `kraty.dailyLogin`: `DailyLoginClient`
+
+```ts
+read(opts?: { as?: string }): Promise<DailyLogin | null>
+```
+
+`GET /sdk/v1/players/:p/daily-login`. The game's daily login calendar:
+`days[{ day, entries }]`, `afterLastDay`, `loginStreak`, `currentDay`,
+`paidToday`, `todayGrantId`, `nextDayAt`, `itemKey`. `null` when the game
+has none or it is off for the key's environment. Read-only: the request's
+session is what pays today's reward (a `daily_login` grant).
+
+## `kraty.guilds`: `GuildsClient`
+
+```ts
+config(opts?): Promise<GuildClientConfig>
+mine(opts?): Promise<MyGuild | null>
+get(guildId: string, opts?): Promise<GuildDetail>
+search(query: string, opts?: { country?: string; limit?: number; as?: string }): Promise<GuildSummary[]>
+recommended(opts?: { country?: string; limit?: number; as?: string }): Promise<RecommendedGuild[]>
+create(input: CreateGuildInput, opts?): Promise<MyGuild>
+join(guildId: string, opts?: { message?: string; as?: string }): Promise<GuildJoinResult>
+myRequests(opts?): Promise<GuildJoinRequest[]>
+cancelRequest(requestId: string, opts?): Promise<void>
+updateProfile(patch: GuildProfilePatch, opts?): Promise<GuildDetail>
+leave(opts?): Promise<GuildLeaveResult>
+requests(opts?): Promise<GuildJoinRequest[]>
+acceptRequest(requestId: string, opts?): Promise<GuildDetail>
+declineRequest(requestId: string, opts?): Promise<void>
+kick(memberExternalId: string, opts?): Promise<GuildDetail>
+promote(memberExternalId: string, opts?): Promise<GuildDetail>
+demote(memberExternalId: string, opts?): Promise<GuildDetail>
+transferLeadership(memberExternalId: string, opts?): Promise<GuildDetail>
+help(opts?): Promise<GuildHelpOverview>
+requestHelp(input: { type; resourceKey; amount }, opts?): Promise<GuildHelpRequest>
+donate(requestId: string, opts?: { amount?: number; as?: string }): Promise<GuildHelpDonation>
+cancelHelp(requestId: string, opts?): Promise<GuildHelpRequest>
+```
+
+`/sdk/v1/players/:p/guild*` and `/guilds*` (docs/25). One guild per player,
+50 members max, leader / co-leader / member. `opts` is `{ as?: string }`.
+
 ## `kraty.players`: `PlayersClient`
 
 ```ts
@@ -190,11 +244,17 @@ LocalStorageSecretStore   // browsers, wraps window.localStorage
 `EntryCostItem`, `Leaderboard`, `EventLeaderboard`, `LeaderboardEntry`,
 `LeaderboardPeriod`, `LeaderboardPeriods`, `Grant`, `GrantKind`,
 `GrantStatus`, `OpenCrateResponse`, `Lobby`, `LobbyStatus`,
-`PlayerItemHolding`, `PlayerWalletHolding`, `PlayerRegistration`,
+`PlayerItemHolding`, `PlayerWalletHolding`, `DailyLogin`, `DailyLoginDay`, `PlayerRegistration`,
+`GuildClientConfig`, `GuildSummary`, `RecommendedGuild`, `GuildMember`, `GuildDetail`, `MyGuild`,
+`GuildJoinRequest`, `GuildJoinResult`, `GuildLeaveResult`, `GuildHelpRequest`, `GuildHelpOverview`,
+`GuildHelpDonation`,
 `ConsumeItemInput`, `ConsumeItemResult`, `DebitWalletInput`,
 `DebitWalletResult`, `Catalog`, `CatalogItem`, `CatalogCurrency`,
 `RewardBundlePreview`, `RewardEntryPreview`, `RewardPolicySummary`,
-`PlayerContext`.
+`PlayerContext`, `TeamSeatView`, `TeamClientOptions`, `TeamSeatMilestone`, `TeamSeatState`,
+`TeamRollup`, `LeaderboardEntryTeam`, `EventTeamMember`, `EventTeamMembersPage`,
+`TeamMatchResult`, `PartnerPlayer`, `PartnerInvite`, `RandomPartnerResult`,
+`PartnerSuggestion`.
 
 ## Errors
 

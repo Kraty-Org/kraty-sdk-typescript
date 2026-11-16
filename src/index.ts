@@ -2,13 +2,17 @@ import { KratyClient, type KratyClientOptions } from './client.js';
 import { KratyApiError } from './errors.js';
 import {
   CatalogClient,
+  ChatClient,
+  DailyLoginClient,
   EventLeaderboardsClient,
   EventsClient,
   FriendsClient,
   GrantsClient,
+  GuildsClient,
   InventoryClient,
   LeaderboardsClient,
   LobbiesClient,
+  ModerationClient,
   PlayersClient,
   PurchasesClient,
   WalletClient,
@@ -22,13 +26,17 @@ export { KratyClient } from './client.js';
 export type { KratyClientOptions, RetryConfig, RequestInfo, ServerTime } from './client.js';
 export {
   CatalogClient,
+  ChatClient,
+  DailyLoginClient,
   EventLeaderboardsClient,
   EventsClient,
   FriendsClient,
   GrantsClient,
+  GuildsClient,
   InventoryClient,
   LeaderboardsClient,
   LobbiesClient,
+  ModerationClient,
   PlayersClient,
   PurchasesClient,
   WalletClient,
@@ -49,6 +57,9 @@ export type { SecretStore } from './secret-store.js';
 export {
   openLeaderboardStream,
 } from './leaderboard-stream.js';
+export { openChatStream } from './chat-stream.js';
+export type { ChatStream, ChatStreamEvent } from './chat-stream.js';
+export type { ChatSendOptions } from './resources.js';
 export type {
   LeaderboardStream,
   LeaderboardStreamEvent,
@@ -103,6 +114,51 @@ export type {
   BoardStandings,
   Catalog,
   CatalogCurrency,
+  CatalogDerivedProgression,
+  DailyLogin,
+  DailyLoginDay,
+  CreateGuildInput,
+  GuildClientConfig,
+  ChatChannel,
+  ChatClientConfig,
+  ChatConversation,
+  ChatConversationDetail,
+  ChatConversationMembers,
+  ChatConversationPage,
+  ChatCustomType,
+  ChatMember,
+  ChatMessageRules,
+  ChatMessage,
+  ChatMessagePage,
+  ChatPlayerRef,
+  ChatPreferences,
+  ChatProfanityMode,
+  ChatUnread,
+  ModerationStatus,
+  MyReport,
+  ReportCategory,
+  ReportInput,
+  Restriction,
+  GuildDetail,
+  GuildHelpSettings,
+  GuildUnlockStatus,
+  GuildWeekSchedule,
+  GuildHelpDonation,
+  GuildHelpOverview,
+  GuildHelpRequest,
+  GuildJoinRequest,
+  GuildJoinResult,
+  GuildJoinType,
+  GuildLeaveResult,
+  GuildMember,
+  GuildPermission,
+  GuildPlayerRef,
+  GuildProfilePatch,
+  GuildRole,
+  GuildSearchPage,
+  GuildSummary,
+  MyGuild,
+  RecommendedGuild,
   CatalogItem,
   ConsumeItemInput,
   ConsumeItemResult,
@@ -112,6 +168,17 @@ export type {
   EntryCostCurrency,
   EntryCostItem,
   EventListing,
+  EventTeamMember,
+  EventTeamMembersPage,
+  TeamSeatMilestone,
+  TeamSeatState,
+  TeamSeatView,
+  TeamRollup,
+  TeamMatchResult,
+  PartnerPlayer,
+  PartnerInvite,
+  RandomPartnerResult,
+  PartnerSuggestion,
   EventLeaderboard,
   EventLeaderboardReadOptions,
   FinishAttemptResponse,
@@ -135,9 +202,11 @@ export type {
   GrantStatus,
   Leaderboard,
   LeaderboardEntry,
+  LeaderboardEntryTeam,
   LeaderboardPeriod,
   LeaderboardPeriods,
   LeaderboardReadOptions,
+  LeaderboardSummary,
   LeaderboardScoreResult,
   Lobby,
   LobbyStatus,
@@ -193,6 +262,10 @@ export class Kraty {
   readonly purchases: PurchasesClient;
   readonly friends: FriendsClient;
   readonly catalog: CatalogClient;
+  readonly dailyLogin: DailyLoginClient;
+  readonly guilds: GuildsClient;
+  readonly chat: ChatClient;
+  readonly moderation: ModerationClient;
 
   constructor(opts: KratyClientOptions) {
     this.client = new KratyClient(opts);
@@ -207,6 +280,10 @@ export class Kraty {
     this.purchases = new PurchasesClient(this.client);
     this.friends = new FriendsClient(this.client);
     this.catalog = new CatalogClient(this.client);
+    this.dailyLogin = new DailyLoginClient(this.client);
+    this.guilds = new GuildsClient(this.client);
+    this.chat = new ChatClient(this.client);
+    this.moderation = new ModerationClient(this.client);
   }
 
   /**
